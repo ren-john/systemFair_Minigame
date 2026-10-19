@@ -1,0 +1,9 @@
+__pycache__/
+.venv/
+preview.png
+preview_settings.png
+preview_crash.png
+preview_name.png
+preview_rankings.png
+data/*.json
+data/*.tmp

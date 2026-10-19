@@ -1,0 +1,5 @@
+# Known compatible with the existing Model Training Python 3.11 environment.
+# MediaPipe 0.10.21 includes Face Mesh and its bundled landmark assets.
+numpy==1.26.4
+opencv-contrib-python==4.10.0.84
+mediapipe==0.10.21
