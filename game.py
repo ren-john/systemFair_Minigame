@@ -179,6 +179,9 @@ def main():
                 elif key >= 0:
                     session.type_name(key)
                 continue
+            if game.state == 'tutorial' and key in (10, 13):
+                session.continue_tutorial()
+                continue
             if key == ord('q'):
                 if session.finish_run():
                     break

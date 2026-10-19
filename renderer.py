@@ -167,7 +167,7 @@ class Renderer:
         warning = pending and game.state == 'running' and tracking and eyes_valid and closed
         text(image, 'OPEN YOUR EYES' if warning else 'NEXT MOTORCYCLE' if pending else 'ROAD WATCH',
              x+17, 445, .4, AMBER if warning else MUTED)
-        text(image, f'{max(0, game.pending):04.1f} s' if pending else 'STAY SHARP', x+16, 489, .91 if pending else .69,
+        text(image, f'{max(0, game.pending):04.1f} s' if pending else 'CLOSE EYES', x+16, 489, .91 if pending else .69,
              AMBER if pending else WHITE, 2)
         text(image, 'Alarm beep = open eyes and prepare' if pending else f'Alarm to spawn: {game.spawn_delay:.1f}s',
              x+17, 518, .35, MUTED)
@@ -197,6 +197,8 @@ class Renderer:
 
         if game.state == 'name':
             self.name_overlay(image, ui)
+        elif game.state == 'tutorial':
+            self.tutorial_overlay(image, ui, demo)
         elif game.state == 'ready':
             self.overlay(image, 'YOUR HEAD. YOUR WHEEL.', [
                 f"Welcome, {ui.driver['name']}. Move your head to steer." if ui.driver else 'Move left and right to dodge incoming motorcycles.',
@@ -224,7 +226,7 @@ class Renderer:
         elif not tracking:
             self.overlay(image, 'TRACKING PAUSED', ['Keep your face and eyes inside the camera view.',
                                                    'The road resumes when tracking returns.'], 'WAITING FOR YOUR FACE', AMBER)
-        if obs.error and game.state != 'won':
+        if obs.error and game.state not in ('won', 'tutorial'):
             cv2.rectangle(image, (90, 551), (830, 704), PANEL, -1)
             text(image, 'CAMERA NEEDS ATTENTION', 113, 581, .5, RED)
             wrapped(image, obs.error, 113, 611, 692, .43, WHITE)
@@ -233,9 +235,56 @@ class Renderer:
             text(image, 'RECORD NOT SAVED', 121, 587, .55, RED, 2)
             wrapped(image, ui.save_error[:180], 121, 614, 690, .38, WHITE, 19)
             text(image, 'Check folder access, then press ENTER to retry.', 121, 672, .43, AMBER)
-        if demo:
+        if demo and game.state != 'tutorial':
             text(image, 'DEMO: MOUSE / A,D STEER   SPACE EYES   L TRACKING LOSS', 120, 737, .42, AMBER)
         return image
+
+    @staticmethod
+    def tutorial_overlay(image, ui, demo):
+        image[:] = image * .10 + np.array(BG) * .90
+        cv2.rectangle(image, (80, 84), (1200, 730), PANEL, -1)
+        cv2.rectangle(image, (80, 84), (1200, 730), TEAL, 2)
+
+        def centered(value, y, size, color=WHITE, weight=1):
+            width = cv2.getTextSize(value, FONT, size, weight)[0][0]
+            text(image, value, (WIDTH-width)/2, y, size, color, weight)
+
+        centered('NIGHT SHIFT  /  QUICK START', 120, .43, TEAL)
+        centered('HOW TO PLAY', 170, 1.05, WHITE, 2)
+        name = ui.driver['name'] if ui.driver else 'Driver'
+        centered(fit_text(f'Welcome, {name}. Dodge 10 motorcycles as fast as you can.', 1040, .50),
+                 208, .50, MUTED)
+        steps = [
+            ('STEER YOUR CAR' if demo else 'STEER WITH YOUR HEAD',
+             'Move the mouse or use A/D or arrow keys to steer. Stay inside the road; hitting a side ends the run.'
+             if demo else
+             'Face the camera and move your head left or right to steer. Stay inside the road; hitting a side ends the run.'),
+            ('CLOSE EYES FOR 3 SECONDS',
+             'Press Space to simulate closed eyes. Keep them closed for 3 continuous seconds to trigger the alarm.'
+             if demo else
+             'Follow CLOSE EYES. Keep your eyes closed for 3 continuous seconds to trigger the alarm. Short blinks do not count.'),
+            ('ALARM = OPEN YOUR EYES',
+             'When the beep starts, press Space again to open your eyes. Move sideways to dodge the motorcycle; the horn means it has spawned.'
+             if demo else
+             'Open your eyes as soon as the beep begins. A motorcycle is coming; move your head to dodge it. The horn means it has spawned.'),
+            ('DODGE 10 TO FINISH',
+             'Each dodge earns 1 point. Bikes get faster and reaction time gets shorter. Reach 10/10; high scores and faster times rank higher.'),
+        ]
+        for i, (title, body) in enumerate(steps):
+            x = 112+(i % 2)*538
+            y = 238+(i // 2)*183
+            cv2.rectangle(image, (x, y), (x+510, y+167), BG, -1)
+            cv2.circle(image, (x+30, y+33), 17, TEAL, -1, cv2.LINE_AA)
+            text(image, str(i+1), x+24, y+40, .56, BG, 2)
+            text(image, title, x+59, y+41, .54, WHITE, 2)
+            wrapped(image, body, x+24, y+77, 462, .46, MUTED, 24)
+
+        centered('P  Pause    G  Car    B  Leaderboard    M  Sound    F  Fullscreen', 623, .42, MUTED)
+        centered('DEMO: SPACE toggles eyes. L toggles tracking loss.' if demo else
+                 'Close eyes  >  Hear alarm  >  Open eyes  >  Dodge. Repeat to 10/10.', 650, .42, AMBER)
+        cv2.rectangle(image, (450, 668), (830, 715), TEAL, -1)
+        centered('ENTER  CONTINUE', 700, .62, BG, 2)
+        text(image, 'ESC / Q  QUIT', 113, 700, .38, MUTED)
 
     @staticmethod
     def victory_overlay(image, game, ui, seconds):

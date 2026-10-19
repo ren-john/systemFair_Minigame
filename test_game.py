@@ -374,6 +374,53 @@ class GameTests(unittest.TestCase):
 
 
 class DesktopIntegrationTests(unittest.TestCase):
+    def test_name_tutorial_ready_and_start_flow_keeps_pre_game_time_out_of_records(self):
+        from unittest.mock import patch, MagicMock
+        from tempfile import TemporaryDirectory
+        from pathlib import Path
+        import json
+        import game as desktop
+
+        engine = Game(random.Random(17))
+        audio = MagicMock(error='', muted=False)
+        ticks = iter(i*.1 for i in range(1000))
+        keys = iter(list(map(ord, 'Guide')) + [13, 32] + [-1]*45
+                    + [ord('m'), ord('m'), 13] + [-1]*20 + [13] + [-1]*20 + [27])
+        observed_states = []
+
+        def next_key(_delay):
+            observed_states.append(engine.state)
+            if engine.state in ('tutorial', 'ready'):
+                self.assertEqual(engine.elapsed, 0)
+                self.assertEqual(engine.score, 0)
+                self.assertEqual(engine.closed_seconds, 0)
+                self.assertIsNone(engine.pending)
+            return next(keys)
+
+        with TemporaryDirectory() as directory, \
+             patch.object(desktop.sys, 'argv', ['game.py', '--demo', '--database', str(Path(directory)/'drivers.json')]), \
+             patch.object(desktop, 'Game', return_value=engine), \
+             patch.object(desktop, 'Horns', return_value=audio), \
+             patch.object(desktop.time, 'monotonic', side_effect=lambda: next(ticks)), \
+             patch.object(desktop.cv2, 'namedWindow'), \
+             patch.object(desktop.cv2, 'resizeWindow'), \
+             patch.object(desktop.cv2, 'setMouseCallback'), \
+             patch.object(desktop.cv2, 'imshow'), \
+             patch.object(desktop.cv2, 'waitKeyEx', side_effect=next_key), \
+             patch.object(desktop.cv2, 'getWindowProperty', return_value=1), \
+             patch.object(desktop.cv2, 'destroyAllWindows'):
+            desktop.main()
+            record = json.loads((Path(directory)/'drivers.json').read_text())['drivers'][0]
+        self.assertGreater(observed_states.count('tutorial'), 40)
+        self.assertGreater(observed_states.count('ready'), 20)
+        self.assertLess(observed_states.index('tutorial'), observed_states.index('ready'))
+        self.assertLess(observed_states.index('ready'), observed_states.index('running'))
+        self.assertLess(engine.elapsed, 3)
+        self.assertEqual(record['attempts'], 1)
+        self.assertEqual(record['best_seconds'], round(engine.elapsed, 3))
+        audio.play_warning.assert_not_called()
+        audio.play.assert_not_called()
+
     def test_impossible_spawn_follows_alarm_after_short_reaction_window(self):
         from unittest.mock import patch, MagicMock
         from tempfile import TemporaryDirectory
@@ -386,7 +433,7 @@ class DesktopIntegrationTests(unittest.TestCase):
         audio.play_warning.side_effect = lambda: events.append(('alarm', engine.elapsed))
         audio.play.side_effect = lambda: events.append(('horn', engine.elapsed))
         ticks = iter(i*.1 for i in range(1000))
-        keys = list(map(ord, 'Fast')) + [13, 13]
+        keys = list(map(ord, 'Fast')) + [13, 13, 13]
         seeded = opened = False
 
         def next_key(_delay):
@@ -432,9 +479,9 @@ class DesktopIntegrationTests(unittest.TestCase):
         renderer = desktop.Renderer(desktop.ROOT / 'assets')
         audio = MagicMock(error='', muted=False)
         ticks = iter(i*.1 for i in range(1000))
-        keys = iter(list(map(ord, 'Auto')) + [13, 13, ord('g'), 2555904, 27, ord('g'),
+        keys = iter(list(map(ord, 'Auto')) + [13, 13, 13, ord('g'), 2555904, 27, ord('g'),
                     ord('1'), ord('4'), 2555904, 13, ord('p'), ord('r')]
-                    + list(map(ord, 'Next')) + [13, 27])
+                    + list(map(ord, 'Next')) + [13, 13, 27])
         seeded = False
         settings_frames = 0
 
@@ -500,7 +547,7 @@ class DesktopIntegrationTests(unittest.TestCase):
         audio.error = ''
         audio.muted = False
         ticks = iter(i*.1 for i in range(1000))
-        keys = (list(map(ord, 'Alarm')) + [13, 13, 32] + [-1]*35
+        keys = (list(map(ord, 'Alarm')) + [13, 13, 13, 32] + [-1]*35
                 + [32, ord('l')] + [-1]*12 + [ord('l'), ord('p')]
                 + [-1]*10 + [ord('p')] + [-1]*60 + [27])
         with TemporaryDirectory() as directory, \
@@ -535,9 +582,9 @@ class DesktopIntegrationTests(unittest.TestCase):
         audio.error = ''
         audio.muted = False
         ticks = iter(i*.1 for i in range(1000))
-        keys = iter(list(map(ord, 'Win')) + [13, 13, -1] + [-1]*5 + [ord('l')]
+        keys = iter(list(map(ord, 'Win')) + [13, 13, 13, -1] + [-1]*5 + [ord('l')]
                     + [-1]*80 + [ord('p'), ord('b'), 27, -1, -1, ord('r')]
-                    + list(map(ord, 'Next')) + [13, 27])
+                    + list(map(ord, 'Next')) + [13, 13, 27])
         seeded = False
         frozen_elapsed = None
         win_frames = 0
@@ -595,7 +642,7 @@ class DesktopIntegrationTests(unittest.TestCase):
         import json
         import game as desktop
 
-        keys = (list(map(ord, 'QRG'))+[13, ord('g'), ord('4'), 2555904, 27,
+        keys = (list(map(ord, 'QRG'))+[13, 13, ord('g'), ord('4'), 2555904, 27,
                 ord('g'), ord('4'), 2555904, 13, 13, ord('d'), ord('l')]
                 + [-1]*3 + [ord('l'), 32] + [-1]*100
                 + [ord('b'), 27, ord('r')] + list(map(ord, 'Next'))

@@ -164,7 +164,9 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(game.state, 'name')
         session.ui.name_input = 'QRG'
         self.assertTrue(session.submit_name())
+        self.assertEqual(game.state, 'tutorial')
         original_id = session.ui.driver['id']
+        session.continue_tutorial()
         session.start()
         game.elapsed = 30
         game.score = 3
@@ -179,6 +181,8 @@ class DriverTests(unittest.TestCase):
         session.ui.name_input = 'qrg'
         session.submit_name()
         self.assertEqual(session.ui.driver['id'], original_id)
+        self.assertEqual(game.state, 'tutorial')
+        session.continue_tutorial()
         session.start()
         game.elapsed = 40
         game.score = 4
@@ -192,6 +196,7 @@ class DriverTests(unittest.TestCase):
         session = DriverSession(game, self.store)
         session.ui.name_input = 'Alex'
         session.submit_name()
+        session.continue_tutorial()
         session.start()
         game.elapsed = 20
         with patch.object(self.store, 'record', side_effect=StoreError('locked')):
@@ -207,6 +212,7 @@ class DriverTests(unittest.TestCase):
         session = DriverSession(game, self.store)
         session.ui.name_input = 'Winner'
         session.submit_name()
+        session.continue_tutorial()
         session.start()
         game.elapsed = 50
         game.score = SCORE_CAP-1
@@ -225,6 +231,34 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(self.store.find('Winner')['best_score'], SCORE_CAP)
         self.assertEqual(self.store.find('Winner')['best_difficulty'], 'impossible')
         self.assertEqual(game.difficulty, 'easy')
+
+    def test_tutorial_and_ready_screen_do_not_count_time_or_attempts(self):
+        game = Game()
+        session = DriverSession(game, self.store)
+        self.assertFalse(session.continue_tutorial())
+        session.ui.name_input = 'Learner'
+        self.assertTrue(session.submit_name())
+        self.assertEqual(game.state, 'tutorial')
+        self.assertFalse(session.start())
+        game.update(60, game.player, True)
+        self.assertEqual(game.elapsed, 0)
+        self.assertEqual(game.score, 0)
+        self.assertIsNone(game.pending)
+        self.assertFalse(game.warning_triggered)
+        self.assertTrue(session.finish_run())
+        self.assertEqual(self.store.find('Learner')['attempts'], 0)
+        self.assertEqual(self.store.ranking(), [])
+        self.assertTrue(session.continue_tutorial())
+        self.assertEqual(game.state, 'ready')
+        self.assertFalse(session.continue_tutorial())
+        game.update(60, game.player, True)
+        self.assertEqual(game.elapsed, 0)
+        self.assertTrue(session.start())
+        game.update(0, game.player, True)
+        game.update(2.999, game.player, True)
+        self.assertIsNone(game.pending)
+        game.update(.001, game.player, True)
+        self.assertTrue(game.warning_triggered)
 
 
 if __name__ == '__main__':

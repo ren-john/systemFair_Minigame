@@ -207,11 +207,18 @@ class DriverSession:
         except (ValueError, StoreError) as exc:
             self.ui.name_error = str(exc)
             return False
+        self.game.state = 'tutorial'
+        return True
+
+    def continue_tutorial(self):
+        if self.game.state != 'tutorial' or self.ui.driver is None:
+            return False
+        self.game.clear_sleep()
         self.game.state = 'ready'
         return True
 
     def start(self):
-        if self.ui.driver is None:
+        if self.ui.driver is None or self.game.state != 'ready':
             return False
         self.game.start()
         self.run_open = True

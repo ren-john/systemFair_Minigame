@@ -8,7 +8,11 @@ and the mission-complete track in `assets/`.
 ## Play
 
 Double-click **start_game.bat**, type a driver name, and press **Enter** to
-confirm it. Face your camera and press **Enter** again to start driving.
+confirm it. A **HOW TO PLAY** tutorial explains steering, the three-second
+eye closure, reopening at the alarm, dodging, and the 10-point mission.
+Press **Enter** to continue to the driving setup, then face your camera and
+press **Enter** again to start driving. The tutorial appears for every driver,
+including returning names, and does not add driving time or an attempt.
 The launcher uses the existing `../Model Training/venv` environment. The first
 camera startup may take a few seconds while face tracking loads.
 
@@ -31,7 +35,7 @@ From PowerShell in this folder:
 | Control | Action |
 | --- | --- |
 | Move head left / right | Steer the car |
-| Enter | Start |
+| Enter | Confirm name / continue tutorial / start driving |
 | P | Pause / resume |
 | G | View automatic difficulty progression and choose a car (pauses the round) |
 | Enter / Esc in settings | Apply / cancel |
@@ -266,3 +270,5 @@ Reaction-timing tests cover every score, stage transitions during an armed
 countdown, frozen timers, restart, and the alarm-to-horn interval at score 9.
 Leaderboard tests cover score-first/fastest-time ordering, personal bests,
 millisecond ties, persistence, invalid results, and version-1 history upgrades.
+Tutorial tests cover name-to-tutorial-to-ready navigation and preventing
+timers, eye qualification, or attempts from starting before driving begins.
