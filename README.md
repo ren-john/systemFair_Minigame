@@ -251,7 +251,7 @@ webcam under a different index, launch with `--source 1`.
 ```powershell
 .\start_game.bat --demo
 .\start_game.bat --smoke-test
-& '..\Model Training\venv\Scripts\python.exe' -m unittest -v test_game test_tracking test_drivers test_audio
+& '..\Model Training\venv\Scripts\python.exe' -m unittest -v test_game test_tracking test_drivers test_audio test_renderer
 ```
 
 Demo mode is explicitly labeled: move the mouse (or A/D / arrow keys) to steer,
@@ -272,3 +272,29 @@ Leaderboard tests cover score-first/fastest-time ordering, personal bests,
 millisecond ties, persistence, invalid results, and version-1 history upgrades.
 Tutorial tests cover name-to-tutorial-to-ready navigation and preventing
 timers, eye qualification, or attempts from starting before driving begins.
+
+## Interface and screen previews
+
+All screens share a navy and mint visual theme, bundled Fira Sans typography,
+rounded panels, keyboard hints, and consistent status colors. The driving
+dashboard groups mission progress, the live timer, camera view, eye-closure
+progress, the next action, and the top five drivers. Name entry, the tutorial,
+garage, leaderboard, pauses, results, and error states use the same visual
+system. Camera previews fit widescreen, standard, and portrait input.
+
+Pillow renders the bundled fonts; install it through `requirements.txt`.
+The font copyright and SIL Open Font License are in `assets/fonts/OFL.txt`.
+
+Generate every screen using synthetic camera/driver data without opening a
+window or accessing the real driver database:
+
+```bash
+.venv/bin/python preview_ui.py
+.venv/bin/python -m unittest -q test_drivers test_game test_tracking test_audio test_renderer
+```
+
+The preview command writes 21 individual screenshots and an `overview.png`
+contact sheet under your system's temporary `nightshift-ui` folder and prints
+the location. Use `--output PATH` to choose another folder. Rendering tests
+cover every screen, long names and errors, camera aspect ratios, and victory
+animation while ensuring drawing never changes gameplay or driver records.

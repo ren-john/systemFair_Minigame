@@ -1,48 +1,17 @@
-"""OpenCV arcade rendering using the supplied transparent PNG artwork."""
-from pathlib import Path
+"""Polished desktop screens over the unchanged OpenCV game coordinates."""
 import math
 
 import cv2
 import numpy as np
 
-from game_core import ROAD_LEFT, ROAD_RIGHT, ROAD_TOP, ROAD_BOTTOM, ASLEEP_SECONDS, DIFFICULTIES, SCORE_CAP
+from game_core import Rect, ROAD_LEFT, ROAD_RIGHT, ROAD_TOP, ROAD_BOTTOM, ASLEEP_SECONDS, DIFFICULTIES, SCORE_CAP
 from drivers import DriverUI, format_time, format_best
+from ui import (BG, SURFACE, RAISED, BORDER, WHITE, MUTED, FAINT, MINT, AMBER, RED, BLUE,
+                color, mix, text, measure, fit, wrap, rounded, card, pill, shortcut,
+                button, bar, icon, photo)
 
 WIDTH, HEIGHT = 1280, 800
-BG = (22, 17, 12)
-PANEL = (35, 29, 22)
-WHITE = (238, 241, 233)
-MUTED = (154, 158, 143)
-TEAL = (183, 231, 73)
-AMBER = (81, 192, 255)
-RED = (107, 100, 249)
-FONT = cv2.FONT_HERSHEY_SIMPLEX
-
-
-def text(image, value, x, y, size=.55, color=WHITE, weight=1):
-    cv2.putText(image, str(value), (int(x), int(y)), FONT, size, color, weight, cv2.LINE_AA)
-
-
-def fit_text(value, width, size=.45):
-    if cv2.getTextSize(value, FONT, size, 1)[0][0] <= width:
-        return value
-    while value and cv2.getTextSize(value+'...', FONT, size, 1)[0][0] > width:
-        value = value[:-1]
-    return value+'...'
-
-
-def wrapped(image, value, x, y, max_width, size=.45, color=MUTED, line_height=22):
-    line = ''
-    for word in value.split():
-        candidate = f'{line} {word}'.strip()
-        if cv2.getTextSize(candidate, FONT, size, 1)[0][0] > max_width and line:
-            text(image, line, x, y, size, color)
-            y += line_height
-            line = word
-        else:
-            line = candidate
-    text(image, line, x, y, size, color)
-    return y + line_height
+STAGE_COLORS = {'easy': MINT, 'medium': BLUE, 'hard': AMBER, 'impossible': RED}
 
 
 def sprite(image, asset, rect):
@@ -50,24 +19,38 @@ def sprite(image, asset, rect):
     if w <= 0 or h <= 0:
         return
     ah, aw = asset.shape[:2]
-    scale = min(w / aw, h / ah)
-    sw, sh = max(1, int(aw * scale)), max(1, int(ah * scale))
+    scale = min(w/aw, h/ah)
+    sw, sh = max(1, int(aw*scale)), max(1, int(ah*scale))
     resized = cv2.resize(asset, (sw, sh), interpolation=cv2.INTER_AREA if scale < 1 else cv2.INTER_LINEAR)
-    x += (w - sw) // 2
-    y += (h - sh) // 2
+    x, y = x+(w-sw)//2, y+(h-sh)//2
     x0, y0 = max(x, 0), max(y, 0)
-    x1, y1 = min(x + sw, image.shape[1]), min(y + sh, image.shape[0])
-    if x1 <= x0 or y1 <= y0:
-        return
-    cut = resized[y0-y:y1-y, x0-x:x1-x]
-    alpha = cut[:, :, 3:4].astype(np.float32) / 255
-    image[y0:y1, x0:x1] = cut[:, :, :3] * alpha + image[y0:y1, x0:x1] * (1-alpha)
+    x1, y1 = min(x+sw, image.shape[1]), min(y+sh, image.shape[0])
+    if x1 > x0 and y1 > y0:
+        cut = resized[y0-y:y1-y, x0-x:x1-x]
+        alpha = cut[:, :, 3:4].astype(np.float32)/255
+        image[y0:y1, x0:x1] = cut[:, :, :3]*alpha + image[y0:y1, x0:x1]*(1-alpha)
+
+
+def centered(image, value, y, size=16, ink=WHITE, bold=False, x=WIDTH/2, width=None):
+    text(image, value, x, y, size, ink, bold, align='center', width=width)
+
+
+def dim(image):
+    image[:] = (image.astype(np.uint16)*30//100).astype(np.uint8)
 
 
 class Renderer:
     def __init__(self, assets):
         self.cars = [self.load(assets / f'car{i}.png') for i in range(1, 4)]
         self.motors = [self.load(assets / f'Motor{i}.png') for i in range(1, 4)]
+        yy, xx = np.mgrid[:HEIGHT, :WIDTH].astype(np.float32)
+        glow = np.exp(-((xx-1000)**2+(yy-80)**2)/240000)
+        self.background = np.empty((HEIGHT, WIDTH, 3), dtype=np.uint8)
+        for c in range(3):
+            self.background[:, :, c] = BG[c]+glow*(RAISED[c]-BG[c])*.7
+        self.road_background = np.empty((ROAD_BOTTOM-ROAD_TOP, ROAD_RIGHT-ROAD_LEFT, 3), np.uint8)
+        for y in range(self.road_background.shape[0]):
+            self.road_background[y] = mix(color('#101A29'), color('#19283A'), y/self.road_background.shape[0])
 
     @staticmethod
     def load(path):
@@ -79,346 +62,441 @@ class Renderer:
             raise RuntimeError(f'PNG is empty: {path}')
         return raw[ys.min():ys.max()+1, xs.min():xs.max()+1]
 
-    def draw(self, game, obs, tracking, closed, car, audio_status, threshold, demo=False,
-             steering_status='live', eyes_valid=True, ui=None, selected_car=None,
-             celebration_time=0.):
-        ui = ui or DriverUI()
-        image = np.full((HEIGHT, WIDTH, 3), BG, dtype=np.uint8)
-        text(image, 'SYSTEMS FAIR  /  INTERACTIVE DRIVE LAB', 38, 32, .43, TEAL)
-        text(image, 'NIGHT SHIFT', 36, 83, 1.35, WHITE, 2)
-        driver_label = (f"{ui.driver['name']} / {ui.driver['id']} / BEST {format_best(ui.driver)}"
-                        if ui.driver else 'Stay alert. Find your gap.')
-        text(image, fit_text(driver_label, 480, .42), 39, 112, .42, MUTED)
-        text(image, 'DODGED', 546, 38, .39, MUTED)
-        text(image, f'{game.score:02} / {SCORE_CAP}', 544, 84, .85, TEAL, 2)
-        text(image, 'DRIVE TIME', 724, 38, .39, MUTED)
-        minutes, seconds = divmod(int(game.elapsed), 60)
-        text(image, f'{minutes:02}:{seconds:02}', 720, 83, 1, WHITE, 2)
-        text(image, f'{game.difficulty.upper()}  /  FASTER PER POINT', 546, 112, .40, AMBER)
-        cv2.line(image, (902, 25), (902, 756), (58, 54, 43), 1)
+    @staticmethod
+    def brand(image, x=44, y=30, compact=False):
+        rounded(image, x, y, 34, 34, mix(SURFACE, MINT, .15), 11)
+        cv2.line(image, (x+11, y+23), (x+15, y+10), MINT, 2, cv2.LINE_AA)
+        cv2.line(image, (x+20, y+23), (x+24, y+10), MINT, 2, cv2.LINE_AA)
+        text(image, 'NIGHT SHIFT', x+47, y+1, 24, WHITE, True)
+        text(image, 'SYSTEMS FAIR  /  HEAD-CONTROLLED ARCADE', x+48, y+34, 10, MUTED)
+        if not compact:
+            cv2.line(image, (44, 99), (1236, 99), BORDER, 1, cv2.LINE_AA)
 
-        # Road and moving markings. Player and hazards share these coordinates.
-        cv2.rectangle(image, (44, ROAD_TOP), (877, ROAD_BOTTOM), (29, 31, 21), -1)
-        cv2.rectangle(image, (ROAD_LEFT, ROAD_TOP), (ROAD_RIGHT, ROAD_BOTTOM), (45, 39, 31), -1)
-        offset = int(game.elapsed * 190) % 90
-        for y in range(ROAD_TOP - 90 + offset, ROAD_BOTTOM, 90):
-            y0, y1 = max(ROAD_TOP, y), min(ROAD_BOTTOM, y + 42)
+    def screen_header(self, image, tag):
+        self.brand(image)
+        w = measure(tag, 11, True)+22
+        pill(image, tag, 1236-w, 35, MUTED)
+
+    @staticmethod
+    def avatar(image, name, x, y, size=36):
+        initials = ''.join(part[0] for part in name.split()[:2]).upper() or 'N'
+        rounded(image, x, y, size, size, mix(SURFACE, MINT, .15), size//3)
+        centered(image, initials, y+(size-14)//2, 14, MINT, True, x+size/2)
+
+    def hero_road(self, image, x, y, w, h, car=0):
+        rounded(image, x, y, w, h, color('#101E2B'), 20)
+        def point(fraction, t):
+            span = w*(.16+.81*t)
+            return round(x+w/2+(fraction-.5)*span), round(y+t*h)
+        polygon = np.array([point(0, 0), point(1, 0), point(1, 1), point(0, 1)], np.int32)
+        cv2.fillConvexPoly(image, polygon, color('#1A3040'), cv2.LINE_AA)
+        for side in (0, 1):
+            cv2.line(image, point(side, 0), point(side, 1), mix(BORDER, MINT, .45), 2, cv2.LINE_AA)
+        for lane in (1/3, 2/3):
+            for start in (.08, .3, .52, .74, .96):
+                cv2.line(image, point(lane, start), point(lane, min(1., start+.11)), color('#536B76'), 2, cv2.LINE_AA)
+        sprite(image, self.motors[1], Rect(x+w*.43, y+h*.12, 32, 53))
+        cv2.ellipse(image, (round(x+w*.54), round(y+h*.84)), (42, 12), 0, 0, 360, color('#0D1924'), -1)
+        sprite(image, self.cars[car], Rect(x+w*.54-52, y+h*.39, 104, h*.53))
+
+    def draw(self, game, obs, tracking, closed, car, audio_status, threshold, demo=False,
+             steering_status='live', eyes_valid=True, ui=None, selected_car=None, celebration_time=0.):
+        ui = ui or DriverUI()
+        image = self.background.copy()
+        if game.state == 'name':
+            self.name_screen(image, ui, car)
+        elif game.state == 'tutorial':
+            self.tutorial_screen(image, ui, demo)
+        elif game.state == 'settings':
+            self.settings_screen(image, game, car if selected_car is None else selected_car)
+        elif game.state == 'rankings':
+            self.rankings_screen(image, ui)
+        elif game.state == 'won':
+            self.victory_screen(image, game, ui, celebration_time)
+        else:
+            self.dashboard(image, game, obs, tracking, closed, car, audio_status, demo, steering_status, eyes_valid, ui)
+            if game.state == 'ready':
+                self.ready_overlay(image, game, ui, tracking, bool(obs.error))
+            elif game.state == 'over':
+                self.result_overlay(image, game, ui)
+            elif game.state == 'paused':
+                self.pause_overlay(image)
+            elif not tracking:
+                self.tracking_overlay(image, obs.error)
+        if ui.save_error:
+            key = 'B / ESC' if game.state == 'rankings' else 'ESC' if game.state == 'settings' else 'ENTER'
+            action = 'Back to retry' if game.state in ('rankings', 'settings') else 'Retry save'
+            self.error_toast(image, 'Your result has not been saved', ui.save_error, key, action)
+        return image
+
+    def dashboard(self, image, game, obs, tracking, closed, car, audio_status, demo, steering_status, eyes_valid, ui):
+        self.brand(image, 32, 23, compact=True)
+        if ui.driver:
+            self.avatar(image, ui.driver['name'], 32, 80, 28)
+            text(image, ui.driver['name'], 71, 81, 14, WHITE, True, width=180)
+            text(image, ui.driver['id'], 71, 102, 10, MUTED)
+            pill(image, game.difficulty.upper(), 258, 84, STAGE_COLORS[game.difficulty], 10)
+        else:
+            text(image, 'Your head. Your wheel.', 33, 88, 16, MUTED)
+        card(image, 382, 20, 230, 98)
+        text(image, 'MISSION PROGRESS', 402, 35, 10, MUTED, True)
+        text(image, f'{game.score:02}', 402, 53, 30, WHITE, True)
+        text(image, f'/ {SCORE_CAP}', 447, 65, 15, MUTED)
+        for i in range(SCORE_CAP):
+            rounded(image, 402+i*19, 99, 14, 4, MINT if i < game.score else BORDER, 2)
+        card(image, 628, 20, 250, 98)
+        text(image, 'DRIVE TIME', 648, 35, 10, MUTED, True)
+        text(image, format_time(game.elapsed), 648, 57, 29, WHITE, True, width=214)
+
+        # These are the original collision coordinates. Only the artwork changes.
+        rounded(image, 44, ROAD_TOP, 834, ROAD_BOTTOM-ROAD_TOP, color('#0D1723'), 15)
+        image[ROAD_TOP:ROAD_BOTTOM, ROAD_LEFT:ROAD_RIGHT] = self.road_background
+        for side in (ROAD_LEFT, ROAD_RIGHT):
+            cv2.line(image, (side, ROAD_TOP), (side, ROAD_BOTTOM-1), color('#385E65'), 2)
+        offset = int(game.elapsed*190) % 90
+        for y in range(ROAD_TOP-90+offset, ROAD_BOTTOM, 90):
+            y0, y1 = max(ROAD_TOP, y), min(ROAD_BOTTOM-1, y+38)
             if y1 > y0:
                 for x in (330, 590):
-                    cv2.rectangle(image, (x-2, y0), (x+2, y1), (91, 87, 70), -1)
-                for x in (55, 860):
-                    cv2.rectangle(image, (x, y0), (x+5, y1), TEAL, -1)
-        for x in (ROAD_LEFT, ROAD_RIGHT):
-            cv2.line(image, (x, ROAD_TOP), (x, ROAD_BOTTOM), (140, 161, 83), 2)
-        for i in range(30):
-            y = ROAD_TOP + i
-            image[y, ROAD_LEFT:ROAD_RIGHT] = image[y, ROAD_LEFT:ROAD_RIGHT] * (0.35 + i / 46)
-        text(image, 'INCOMING TRAFFIC', 380, 169, .38, MUTED)
-        # Draw only inside the road so incoming artwork cannot cover the header.
+                    rounded(image, x-1, y0, 3, y1-y0, color('#3B5065'), 1)
+                for x in (54, 863):
+                    rounded(image, x, y0, 4, y1-y0, mix(BG, MINT, .6), 2)
         road = image[ROAD_TOP:ROAD_BOTTOM, ROAD_LEFT:ROAD_RIGHT]
-        from game_core import Rect
         for bike in game.bikes:
             r = bike.rect
             sprite(road, self.motors[bike.style], Rect(r.x-ROAD_LEFT, r.y-ROAD_TOP, r.w, r.h))
         p = game.player
-        x0, y0, x1, y1 = int(p.x), int(p.y), int(p.x+p.w), int(p.y+p.h)
-        color = RED if game.state == 'over' else AMBER if tracking and steering_status != 'live' else TEAL if tracking else MUTED
-        cv2.rectangle(image, (x0, y0), (x1, y1), color, 1)
+        accent = RED if game.state == 'over' else AMBER if tracking and steering_status != 'live' else MINT if tracking else FAINT
+        x0, y0, x1, y1 = map(round, (p.x, p.y, p.x+p.w, p.y+p.h))
+        cv2.rectangle(image, (x0, y0), (x1, y1), mix(BG, accent, .38), 1)
         for x, dx in ((x0, 1), (x1, -1)):
             for y, dy in ((y0, 1), (y1, -1)):
-                cv2.line(image, (x, y), (x+dx*14, y), color, 3)
-                cv2.line(image, (x, y), (x, y+dy*14), color, 3)
+                cv2.line(image, (x, y), (x+dx*13, y), accent, 2, cv2.LINE_AA)
+                cv2.line(image, (x, y), (x, y+dy*13), accent, 2, cv2.LINE_AA)
         sprite(image, self.cars[car], p)
-        text(image, 'FACE HITBOX', x0, y0-9, .34, color)
+        text(image, 'YOU', x0, y0-20, 10, accent, True)
+        self.monitor(image, game, obs, tracking, closed, demo, steering_status, eyes_valid)
+        self.action_card(image, game, tracking, closed, eyes_valid)
+        self.mini_rankings(image, ui)
+        x = 44
+        for key, label in (('P', 'Pause'), ('G', 'Garage'), ('B', 'Board'), ('R', 'New driver'), ('M', 'Sound'), ('F', 'Fullscreen'), ('ESC', 'Quit')):
+            x = shortcut(image, key, label, x, 768, 11)
+        sound = 'Sound off' if 'MUTED' in audio_status else 'Audio unavailable' if 'UNAVAILABLE' in audio_status else 'Sound on'
+        text(image, sound, 1254, 773, 11, MUTED, align='right')
+        if demo:
+            pill(image, 'DEMO  ·  MOUSE / A,D   ·   SPACE EYES   ·   L TRACKING', 190, 721, MUTED, 10)
+        if game.pending is not None and game.state == 'running' and tracking and eyes_valid and closed:
+            card(image, 202, 170, 516, 87, mix(SURFACE, AMBER, .07), 18, mix(BORDER, AMBER, .5))
+            icon(image, 'eye', 236, 203, 27, AMBER)
+            text(image, 'OPEN YOUR EYES', 266, 188, 25, AMBER, True)
+            text(image, f'Motorcycle arrives in {game.pending:.1f} seconds. Get ready to dodge.', 226, 229, 13, WHITE)
 
-        # Driver instrument panel.
-        x = 934
-        text(image, 'DRIVER MONITOR', x, 47, .57, WHITE, 1)
-        status = ('STEERING / '+steering_status.upper() if tracking and steering_status != 'live'
-                  else 'LIVE / LOCAL CAMERA' if not demo else 'DEMO / SIMULATED INPUT')
-        text(image, status, x, 73, .38, color)
-        cv2.rectangle(image, (x, 95), (1244, 307), PANEL, -1)
+    def monitor(self, image, game, obs, tracking, closed, demo, steering_status, eyes_valid):
+        card(image, 914, 20, 342, 332)
+        text(image, 'DRIVER VIEW', 934, 38, 11, MUTED, True)
+        tag = 'DEMO' if demo else 'LIVE' if tracking else 'CONNECTING'
+        tag_color = MINT if tracking else AMBER
+        tw = measure(tag, 10, True)+22
+        pill(image, tag, 1236-tw, 31, tag_color, 10)
+        rounded(image, 930, 65, 310, 181, BG, 11)
         if obs.frame is not None:
             frame = cv2.flip(obs.frame, 1).copy()
             fh, fw = frame.shape[:2]
             if obs.box is not None:
                 bx0, by0, bx1, by1 = obs.box
-                cv2.rectangle(frame, (int(fw-bx1), int(by0)), (int(fw-bx0), int(by1)), color, 2)
-            scale = min(310 / fw, 212 / fh)
-            preview = cv2.resize(frame, (max(1, int(fw*scale)), max(1, int(fh*scale))))
+                cv2.rectangle(frame, (round(fw-bx1), round(by0)), (round(fw-bx0), round(by1)), MINT if tracking else AMBER, 2)
+            scale = min(306/fw, 177/fh)
+            preview = cv2.resize(frame, (max(1, round(fw*scale)), max(1, round(fh*scale))))
             ph, pw = preview.shape[:2]
-            px, py = x + (310-pw)//2, 95 + (212-ph)//2
-            image[py:py+ph, px:px+pw] = preview
+            px, py = 932+(306-pw)//2, 67+(177-ph)//2
+            photo(image, preview, px, py)
         else:
-            text(image, 'HEAD LEFT  < >  HEAD RIGHT', x+24, 189, .42, MUTED)
-            text(image, 'Camera preview appears here', x+28, 217, .38, MUTED)
-        state = ('WAITING FOR TRACKING' if not tracking else 'EYES UNAVAILABLE' if not eyes_valid else 'ASLEEP' if game.asleep
-                 else 'EYES CLOSED' if closed else 'EYES OPEN')
-        state_color = MUTED if not tracking or not eyes_valid else RED if game.asleep else AMBER if closed else TEAL
-        cv2.circle(image, (x+6, 338), 5, state_color, -1, cv2.LINE_AA)
-        text(image, state, x+22, 344, .53, state_color)
-        ear = f'{obs.ear:.3f}' if eyes_valid and math.isfinite(obs.ear) else '--'
-        text(image, f'EAR  {ear}    /    LIMIT  {threshold:.2f}', x, 371, .4, MUTED)
-        text(image, f'CLOSED  {min(game.closed_seconds, ASLEEP_SECONDS):.1f} / {ASLEEP_SECONDS:.1f} SECONDS',
-             x, 394, .35, state_color)
+            icon(image, 'head', 1085, 128, 58, mix(FAINT, MINT, .35))
+            centered(image, 'Move left. Move right.', 182, 14, MUTED, x=1085)
+            centered(image, 'Demo controls are active' if demo else 'Center your face in the camera', 208, 11, FAINT, x=1085)
+        label = ('Tracking paused' if not tracking else 'Eyes unavailable' if not eyes_valid else
+                 'Eyes closed' if closed else 'Eyes open')
+        ink = FAINT if not tracking or not eyes_valid else AMBER if closed else MINT
+        icon(image, 'closed' if closed else 'eye', 946, 271, 20, ink)
+        text(image, label, 968, 261, 16, WHITE, True)
+        text(image, steering_status.capitalize() if tracking and steering_status != 'live' else 'Ready to steer' if tracking else 'Waiting for your face',
+             968, 284, 11, MUTED)
+        bar(image, 934, 310, 302, game.closed_seconds/ASLEEP_SECONDS, ink, 4)
+        text(image, f'{min(game.closed_seconds, ASLEEP_SECONDS):.1f}s / 3s eye closure', 934, 323, 10, MUTED)
 
-        cv2.rectangle(image, (x, 418), (1244, 535), PANEL, -1)
+    @staticmethod
+    def action_card(image, game, tracking, closed, eyes_valid):
         pending = game.pending is not None
-        warning = pending and game.state == 'running' and tracking and eyes_valid and closed
-        text(image, 'OPEN YOUR EYES' if warning else 'NEXT MOTORCYCLE' if pending else 'ROAD WATCH',
-             x+17, 445, .4, AMBER if warning else MUTED)
-        text(image, f'{max(0, game.pending):04.1f} s' if pending else 'CLOSE EYES', x+16, 489, .91 if pending else .69,
-             AMBER if pending else WHITE, 2)
-        text(image, 'Alarm beep = open eyes and prepare' if pending else f'Alarm to spawn: {game.spawn_delay:.1f}s',
-             x+17, 518, .35, MUTED)
+        warning = pending and closed and eyes_valid and tracking
+        ink = AMBER if pending else MINT
+        card(image, 914, 370, 342, 157, mix(SURFACE, ink, .035), stroke=mix(BORDER, ink, .22))
+        text(image, 'NEXT ACTION', 934, 389, 10, MUTED, True)
+        title = 'OPEN YOUR EYES' if warning else 'GET READY' if pending else 'CLOSE EYES'
+        if not pending and tracking and not eyes_valid:
+            title = 'FACE CAMERA'
+        text(image, title, 934, 414, 23 if pending else 28, ink, True)
+        if pending:
+            text(image, f'{max(0, game.pending):.1f}s', 1234, 415, 23, WHITE, True, align='right')
+        text(image, 'Move sideways when the motorcycle arrives.' if pending else
+             'Keep your eyes visible to continue.' if not eyes_valid else 'Hold for 3 seconds. Open at the alarm.',
+             934, 455, 12, MUTED)
+        pill(image, 'SPAWN ARMED' if pending else f'REACTION WINDOW  {game.spawn_delay:.1f}s', 934, 485, ink, 10)
 
-        text(image, 'TOP DRIVERS', x, 562, .46, WHITE)
-        text(image, 'SCORE FIRST / FASTEST TIME / B ALL', x, 583, .31, TEAL)
+    @staticmethod
+    def mini_rankings(image, ui):
+        card(image, 914, 545, 342, 203)
+        text(image, 'TOP DRIVERS', 934, 563, 11, MUTED, True)
+        shortcut(image, 'B', 'All', 1160, 555, 11)
+        text(image, 'Score first, then fastest time', 934, 585, 10, FAINT)
         for i, driver in enumerate(ui.rankings[:5]):
-            y = 610+i*28
+            y = 610+i*25
             active = ui.driver and driver['id'] == ui.driver['id']
-            color = TEAL if active else WHITE
-            text(image, str(driver['rank']), x, y, .42, color)
-            text(image, fit_text(driver['name'], 112, .40), x+25, y, .40, color)
-            text(image, f"{driver['best_score']:02}/{SCORE_CAP}", x+146, y, .35, TEAL)
-            text(image, format_time(driver['best_seconds']), x+198, y, .37, AMBER)
+            ink = MINT if active else WHITE
+            text(image, f'{i+1:02}', 934, y, 11, MINT if i == 0 else FAINT, True)
+            text(image, driver['name'], 962, y, 12, ink, width=112)
+            text(image, f"{driver['best_score']}/{SCORE_CAP}", 1088, y, 11, MINT, True)
+            text(image, format_time(driver['best_seconds']), 1236, y, 11, MUTED, align='right')
         if not ui.rankings:
-            wrapped(image, 'No drives yet. Your first run will appear here.', x, 620, 300, .45)
-        text(image, audio_status, x, 750, .35, MUTED)
-        footer = ('TYPE NAME   BACKSPACE Delete   ENTER Continue   ESC Exit' if game.state == 'name' else
-                  'ENTER Start   G Settings   B Rankings   P Pause   R New driver   M Sound   F Fullscreen   ESC Exit')
-        text(image, footer, 40, 784, .40, MUTED)
+            icon(image, 'flag', 1085, 641, 29, FAINT)
+            centered(image, 'Your next run could lead the board.', 682, 12, MUTED, x=1085)
 
-        if warning:
-            cv2.rectangle(image, (188, 184), (732, 253), PANEL, -1)
-            cv2.rectangle(image, (188, 184), (732, 253), AMBER, 2)
-            text(image, 'OPEN YOUR EYES', 302, 215, .75, AMBER, 2)
-            text(image, f'Motorcycle incoming in {game.pending:.1f} seconds', 299, 241, .42, WHITE)
+    def name_screen(self, image, ui, car):
+        self.screen_header(image, '01 / 03  ·  DRIVER PROFILE')
+        card(image, 44, 128, 604, 606, mix(SURFACE, MINT, .025), 24)
+        pill(image, 'TEN DODGES. ONE MISSION.', 76, 159, MINT)
+        text(image, 'Your head.', 76, 216, 58, WHITE, True)
+        text(image, 'Your wheel.', 76, 280, 58, MINT, True)
+        wrap(image, 'Stay alert. Find your gap. Finish the mission faster than anyone else.', 78, 360, 490, 17)
+        self.hero_road(image, 76, 429, 540, 235, car)
+        icon(image, 'head', 90, 697, 20, MINT)
+        text(image, 'Steer with your head', 111, 690, 13, MUTED)
+        icon(image, 'flag', 364, 697, 20, MINT)
+        text(image, 'Race to 10 / 10', 385, 690, 13, MUTED)
 
-        if game.state == 'name':
-            self.name_overlay(image, ui)
-        elif game.state == 'tutorial':
-            self.tutorial_overlay(image, ui, demo)
-        elif game.state == 'ready':
-            self.overlay(image, 'YOUR HEAD. YOUR WHEEL.', [
-                f"Welcome, {ui.driver['name']}. Move your head to steer." if ui.driver else 'Move left and right to dodge incoming motorcycles.',
-                'Hear the alarm? Open your eyes and get ready.',
-                f'3s closed eyes, then {game.spawn_delay:.1f}s to spawn. G: settings.'
-            ], 'PRESS ENTER TO DRIVE' if tracking else 'WAITING FOR YOUR FACE', TEAL)
-        elif game.state == 'over':
-            reason = {'left road edge': 'You hit the left side of the road.',
-                      'right road edge': 'You hit the right side of the road.',
-                      'motorcycle': 'You collided with a motorcycle.'}.get(game.crash_reason, 'Your car crashed.')
-            self.overlay(image, 'YOU CRASHED', [
-                f'{game.score} motorcycles dodged in {int(game.elapsed)} seconds.',
-                reason,
-                ui.result_message or 'Stay inside the road and avoid incoming traffic.'
-            ], 'PRESS R FOR THE NEXT DRIVER', RED)
-        elif game.state == 'won':
-            self.victory_overlay(image, game, ui, celebration_time)
-        elif game.state == 'paused':
-            self.overlay(image, 'TAKE A BREATHER', ['Your drive and spawn timer are paused.',
-                                                    'Get comfortable, then continue.'], 'PRESS P TO RESUME', TEAL)
-        elif game.state == 'settings':
-            self.settings_overlay(image, game, car if selected_car is None else selected_car)
-        elif game.state == 'rankings':
-            self.rankings_overlay(image, ui)
-        elif not tracking:
-            self.overlay(image, 'TRACKING PAUSED', ['Keep your face and eyes inside the camera view.',
-                                                   'The road resumes when tracking returns.'], 'WAITING FOR YOUR FACE', AMBER)
-        if obs.error and game.state not in ('won', 'tutorial'):
-            cv2.rectangle(image, (90, 551), (830, 704), PANEL, -1)
-            text(image, 'CAMERA NEEDS ATTENTION', 113, 581, .5, RED)
-            wrapped(image, obs.error, 113, 611, 692, .43, WHITE)
-        if ui.save_error:
-            cv2.rectangle(image, (100, 560), (840, 688), PANEL, -1)
-            text(image, 'RECORD NOT SAVED', 121, 587, .55, RED, 2)
-            wrapped(image, ui.save_error[:180], 121, 614, 690, .38, WHITE, 19)
-            text(image, 'Check folder access, then press ENTER to retry.', 121, 672, .43, AMBER)
-        if demo and game.state != 'tutorial':
-            text(image, 'DEMO: MOUSE / A,D STEER   SPACE EYES   L TRACKING LOSS', 120, 737, .42, AMBER)
-        return image
+        card(image, 674, 128, 562, 606, radius=24)
+        text(image, 'LET’S MEET THE DRIVER', 712, 167, 11, MINT, True)
+        text(image, 'Who’s driving?', 712, 204, 36, WHITE, True)
+        wrap(image, 'Use your name to save your score and keep improving your best time.', 714, 257, 468, 16)
+        text(image, 'DRIVER NAME', 714, 323, 11, MUTED, True)
+        text(image, f'{len(ui.name_input)} / 24', 1194, 323, 11, FAINT, align='right')
+        rounded(image, 712, 348, 486, 70, BG, 13, MINT if not ui.name_error else RED)
+        value = ui.name_input or 'Enter your name'
+        text(image, value, 734, 369, 25, WHITE if ui.name_input else FAINT, width=436)
+        if ui.name_input:
+            cx = 735+measure(fit(ui.name_input, 436, 25), 25)
+            cv2.line(image, (cx+3, 367), (cx+3, 396), MINT, 2, cv2.LINE_AA)
+        text(image, 'Up to 24 characters. Use the same name when you return.', 714, 434, 12, FAINT)
+        rounded(image, 712, 475, 486, 98, BG, 14)
+        if ui.name_error:
+            icon(image, 'alert', 740, 503, 20, RED)
+            wrap(image, ui.name_error, 766, 493, 408, 14, RED, max_lines=3)
+        elif ui.name_match:
+            self.avatar(image, ui.name_match['name'], 730, 495)
+            text(image, f"Welcome back · {ui.name_match['id']}", 783, 495, 14, WHITE, True)
+            text(image, format_best(ui.name_match), 783, 523, 13, MINT, width=388)
+        else:
+            icon(image, 'head', 744, 512, 26, MINT)
+            text(image, 'A fresh start', 782, 496, 15, WHITE, True)
+            text(image, 'Your driver profile will be created when you continue.', 782, 526, 12, MUTED, width=390)
+        button(image, 'Continue to the tutorial', 'ENTER', 712, 604, 486)
+        shortcut(image, 'ESC', 'Quit', 712, 681)
+        text(image, 'No timer starts until you’re ready.', 1198, 688, 12, MUTED, align='right')
 
-    @staticmethod
-    def tutorial_overlay(image, ui, demo):
-        image[:] = image * .10 + np.array(BG) * .90
-        cv2.rectangle(image, (80, 84), (1200, 730), PANEL, -1)
-        cv2.rectangle(image, (80, 84), (1200, 730), TEAL, 2)
-
-        def centered(value, y, size, color=WHITE, weight=1):
-            width = cv2.getTextSize(value, FONT, size, weight)[0][0]
-            text(image, value, (WIDTH-width)/2, y, size, color, weight)
-
-        centered('NIGHT SHIFT  /  QUICK START', 120, .43, TEAL)
-        centered('HOW TO PLAY', 170, 1.05, WHITE, 2)
+    def tutorial_screen(self, image, ui, demo):
+        self.screen_header(image, '02 / 03  ·  HOW TO PLAY')
+        text(image, 'How to play.', 64, 126, 38, WHITE, True)
         name = ui.driver['name'] if ui.driver else 'Driver'
-        centered(fit_text(f'Welcome, {name}. Dodge 10 motorcycles as fast as you can.', 1040, .50),
-                 208, .50, MUTED)
+        text(image, f'Welcome, {name}. Learn the loop, then make every second count.', 66, 177, 16, MUTED, width=1150)
         steps = [
-            ('STEER YOUR CAR' if demo else 'STEER WITH YOUR HEAD',
-             'Move the mouse or use A/D or arrow keys to steer. Stay inside the road; hitting a side ends the run.'
-             if demo else
-             'Face the camera and move your head left or right to steer. Stay inside the road; hitting a side ends the run.'),
-            ('CLOSE EYES FOR 3 SECONDS',
-             'Press Space to simulate closed eyes. Keep them closed for 3 continuous seconds to trigger the alarm.'
-             if demo else
-             'Follow CLOSE EYES. Keep your eyes closed for 3 continuous seconds to trigger the alarm. Short blinks do not count.'),
-            ('ALARM = OPEN YOUR EYES',
-             'When the beep starts, press Space again to open your eyes. Move sideways to dodge the motorcycle; the horn means it has spawned.'
-             if demo else
-             'Open your eyes as soon as the beep begins. A motorcycle is coming; move your head to dodge it. The horn means it has spawned.'),
-            ('DODGE 10 TO FINISH',
-             'Each dodge earns 1 point. Bikes get faster and reaction time gets shorter. Reach 10/10; high scores and faster times rank higher.'),
+            ('wheel', '01', 'Steer your car' if demo else 'Your head is the steering wheel',
+             'Move the mouse or use A/D or arrow keys. Stay inside the road; touching a side ends the run.' if demo else
+             'Face the camera. Move your head left or right to steer. Stay inside the road; touching a side ends the run.'),
+            ('closed', '02', 'Close your eyes for 3 seconds',
+             'Press Space to close your simulated eyes. Keep them closed for 3 continuous seconds to trigger the alarm.' if demo else
+             'Follow CLOSE EYES. Keep them closed for 3 continuous seconds to trigger the alarm. Short blinks do not count.'),
+            ('eye', '03', 'Hear the alarm? Open your eyes.',
+             'Press Space again when the beep begins. Move sideways to dodge. The horn means the motorcycle has spawned.' if demo else
+             'Open your eyes as soon as the beep begins. A motorcycle is coming. Move your head sideways to dodge it.'),
+            ('flag', '04', 'Ten dodges. Mission complete.',
+             'Each dodge earns a point. Bikes get faster and reaction time gets shorter. Higher scores rank first; faster times break ties.'),
         ]
-        for i, (title, body) in enumerate(steps):
-            x = 112+(i % 2)*538
-            y = 238+(i // 2)*183
-            cv2.rectangle(image, (x, y), (x+510, y+167), BG, -1)
-            cv2.circle(image, (x+30, y+33), 17, TEAL, -1, cv2.LINE_AA)
-            text(image, str(i+1), x+24, y+40, .56, BG, 2)
-            text(image, title, x+59, y+41, .54, WHITE, 2)
-            wrapped(image, body, x+24, y+77, 462, .46, MUTED, 24)
+        for i, (mark, number, title, body) in enumerate(steps):
+            x, y = 64+(i % 2)*588, 222+(i//2)*190
+            card(image, x, y, 564, 172, radius=18)
+            pill(image, f'STEP {number}', x+24, y+20, MINT, 10)
+            icon(image, mark, x+518, y+34, 27, mix(FAINT, MINT, .5))
+            text(image, title, x+24, y+64, 21, WHITE, True, width=516)
+            wrap(image, body, x+24, y+100, 508, 15, line_height=22, max_lines=3)
+        rounded(image, 64, 612, 714, 104, mix(SURFACE, MINT, .045), 16, BORDER)
+        text(image, 'THE LOOP', 88, 632, 10, MINT, True)
+        text(image, 'Close eyes  →  Alarm  →  Open eyes  →  Dodge', 88, 658, 19, WHITE, True)
+        text(image, 'Demo: Space toggles eyes. L toggles tracking.' if demo else 'Repeat until 10 / 10. The fastest completion leads.',
+             88, 690, 12, MUTED)
+        button(image, 'I’m ready', 'ENTER', 842, 634, 374)
+        shortcut(image, 'ESC', 'Quit', 842, 700)
+        x = 66
+        for key, label in (('P', 'Pause'), ('G', 'Garage'), ('B', 'Board'), ('M', 'Sound'), ('F', 'Fullscreen')):
+            x = shortcut(image, key, label, x, 753, 11)
 
-        centered('P  Pause    G  Car    B  Leaderboard    M  Sound    F  Fullscreen', 623, .42, MUTED)
-        centered('DEMO: SPACE toggles eyes. L toggles tracking loss.' if demo else
-                 'Close eyes  >  Hear alarm  >  Open eyes  >  Dodge. Repeat to 10/10.', 650, .42, AMBER)
-        cv2.rectangle(image, (450, 668), (830, 715), TEAL, -1)
-        centered('ENTER  CONTINUE', 700, .62, BG, 2)
-        text(image, 'ESC / Q  QUIT', 113, 700, .38, MUTED)
-
-    @staticmethod
-    def victory_overlay(image, game, ui, seconds):
-        """Animate the celebration independently of the frozen driving timer."""
-        image[:] = image * .12 + np.array(BG) * .88
-        colors = (TEAL, AMBER, WHITE, RED, (233, 143, 211))
-        for i in range(100):
-            x = int((i*137 + 24*math.sin(seconds*1.6+i)) % WIDTH)
-            y = int((i*79 + seconds*(45+i % 7*12)) % HEIGHT)
-            angle = seconds*2.5+i
-            dx, dy = int(5*math.cos(angle)), int(5*math.sin(angle))
-            cv2.line(image, (x-dx, y-dy), (x+dx, y+dy), colors[i % len(colors)], 3, cv2.LINE_AA)
-
-        cv2.rectangle(image, (182, 127), (1122, 717), (8, 10, 8), -1)
-        cv2.rectangle(image, (170, 115), (1110, 705), PANEL, -1)
-        cv2.rectangle(image, (170, 115), (1110, 705), TEAL, 2)
-        cv2.line(image, (470, 115), (810, 115), AMBER, 4)
-
-        def centered(value, y, size, color=WHITE, weight=1):
-            width = cv2.getTextSize(value, FONT, size, weight)[0][0]
-            text(image, value, (WIDTH-width)/2, y, size, color, weight)
-
-        centered('NIGHT SHIFT  /  PERFECT RUN', 158, .44, TEAL)
-        # A small trophy drawn with native OpenCV shapes.
-        cv2.ellipse(image, (606, 211), (25, 21), 0, 70, 290, AMBER, 5, cv2.LINE_AA)
-        cv2.ellipse(image, (674, 211), (25, 21), 0, -110, 110, AMBER, 5, cv2.LINE_AA)
-        cup = np.array([[602, 188], [678, 188], [668, 232], [640, 249], [612, 232]], dtype=np.int32)
-        cv2.fillConvexPoly(image, cup, AMBER, cv2.LINE_AA)
-        cv2.line(image, (640, 245), (640, 265), AMBER, 7)
-        cv2.rectangle(image, (614, 265), (666, 273), AMBER, -1)
-        centered('MISSION COMPLETE', 332, 1.45, WHITE, 3)
-        driver = ui.driver['name'] if ui.driver else 'DRIVER'
-        centered(fit_text(driver, 740, .75), 378, .75, TEAL, 2)
-
-        for x0, x1 in ((300, 622), (658, 980)):
-            cv2.rectangle(image, (x0, 410), (x1, 506), BG, -1)
-        text(image, 'MOTORCYCLES DODGED', 328, 439, .39, MUTED)
-        text(image, f'{game.score} / {SCORE_CAP}', 378, 484, 1., TEAL, 2)
-        text(image, 'COMPLETION TIME', 693, 439, .39, MUTED)
-        text(image, format_time(game.elapsed), 718, 484, .95, AMBER, 2)
-        for i in range(SCORE_CAP):
-            x = 300+i*69
-            cv2.rectangle(image, (x, 529), (x+59, 539), TEAL, -1)
-        centered(ui.result_message or 'All ten motorcycles cleared. Mission accomplished.', 579, .46, MUTED)
-        centered('PRESS R FOR THE NEXT DRIVER', 632, .58, TEAL, 2)
-        centered('ESC  Quit     M  Sound     B  Rankings', 671, .42, MUTED)
-
-    def settings_overlay(self, image, game, car):
-        from game_core import Rect
-        shade = image[165:655, 133:788]
-        shade[:] = shade * .10 + np.array(PANEL) * .90
-        cv2.rectangle(image, (133, 165), (788, 655), (70, 74, 57), 1)
-        text(image, 'DRIVE SETTINGS', 165, 208, .85, WHITE, 2)
-        text(image, 'AUTOMATIC DIFFICULTY  /  PROGRESS BY SCORING', 168, 235, .39, MUTED)
+    def settings_screen(self, image, game, car):
+        self.screen_header(image, 'GARAGE  /  MISSION SETTINGS')
+        text(image, 'Make it your drive.', 48, 123, 36, WHITE, True)
+        text(image, 'Choose your car. The challenge grows with your score.', 50, 176, 16, MUTED)
+        card(image, 48, 218, 566, 474, radius=22)
+        text(image, 'THE ROAD GETS HARDER', 74, 243, 11, MINT, True)
+        text(image, 'Automatic difficulty', 74, 270, 24, WHITE, True)
         stages = list(DIFFICULTIES.items())
         for i, (name, settings) in enumerate(stages):
-            y = 250 + i * 37
-            active = name == game.difficulty
-            if active:
-                cv2.rectangle(image, (158, y), (761, y+32), (60, 65, 35), -1)
-                cv2.rectangle(image, (158, y), (761, y+32), TEAL, 1)
+            y = 318+i*81
             end = stages[i+1][1].start_score-1 if i+1 < len(stages) else SCORE_CAP-1
-            points = end-settings.start_score
-            end_speed = settings.start_speed+points*settings.speed_step
-            end_delay = settings.spawn_delay-points*settings.delay_step
-            text(image, name.upper(), 172, y+24, .48, TEAL if active else WHITE, 2 if active else 1)
-            text(image, f'Score {settings.start_score}-{end}  /  {settings.start_speed:g}-{end_speed:g} px/s',
-                 377, y+13, .35, MUTED)
-            text(image, f'Alarm to spawn: {settings.spawn_delay:.1f}-{end_delay:.1f}s',
-                 377, y+28, .35, AMBER)
-        text(image, 'YOUR CAR  /  LEFT & RIGHT ARROWS', 168, 420, .39, MUTED)
+            steps = end-settings.start_score
+            end_speed = settings.start_speed+steps*settings.speed_step
+            end_delay = settings.spawn_delay-steps*settings.delay_step
+            active, accent = name == game.difficulty, STAGE_COLORS[name]
+            rounded(image, 74, y, 514, 69, mix(SURFACE, accent, .09) if active else BG, 12, mix(BORDER, accent, .6) if active else None)
+            cv2.circle(image, (94, y+21), 4, accent, -1, cv2.LINE_AA)
+            text(image, name.capitalize(), 110, y+12, 18, accent if active else WHITE, True)
+            text(image, f'SCORE {settings.start_score}–{end}', 568, y+17, 10, MUTED, True, align='right')
+            text(image, f'{settings.start_speed:g}–{end_speed:g} px/s', 110, y+43, 12, MUTED)
+            text(image, f'{settings.spawn_delay:.1f}–{end_delay:.1f}s to react', 308, y+43, 12, MUTED)
+        text(image, 'Every point makes the next motorcycle tougher.', 76, 660, 12, MUTED)
+        card(image, 638, 218, 594, 474, radius=22)
+        text(image, 'YOUR CAR', 664, 243, 11, MINT, True)
+        text(image, 'Pick your ride.', 664, 270, 24, WHITE, True)
         for i, asset in enumerate(self.cars):
-            gx = 168+i*198
-            cv2.rectangle(image, (gx, 434), (gx+178, 524), PANEL, -1)
-            cv2.rectangle(image, (gx, 434), (gx+178, 524), TEAL if i == car else (70, 74, 57), 1)
-            sprite(image, asset, Rect(gx+40, 440, 98, 66))
-            text(image, ['GRAPHITE', 'RED', 'BLUE'][i], gx+49, 518, .36, TEAL if i == car else MUTED)
-        text(image, 'Every point means faster bikes and less reaction time.', 168, 553, .43, WHITE)
-        text(image, 'Car changes keep your score and current round.', 168, 580, .40, MUTED)
-        text(image, 'ENTER Apply     ESC Cancel', 168, 623, .55, TEAL, 2)
+            x = 664+i*184
+            active = i == car
+            rounded(image, x, 320, 174, 216, mix(SURFACE, MINT, .08) if active else BG, 16, MINT if active else BORDER)
+            sprite(image, asset, Rect(x+34, 348, 106, 139))
+            centered(image, ('Graphite', 'Crimson', 'Azure')[i], 507, 16, MINT if active else WHITE, True, x+87)
+            if active:
+                cv2.circle(image, (x+151, 342), 8, MINT, -1, cv2.LINE_AA)
+                cv2.line(image, (x+147, 342), (x+150, 345), BG, 2, cv2.LINE_AA)
+                cv2.line(image, (x+150, 345), (x+156, 338), BG, 2, cv2.LINE_AA)
+        shortcut(image, '← / →', 'Change car', 664, 566)
+        rounded(image, 664, 614, 540, 48, BG, 12)
+        text(image, 'Your score and current round stay with you.', 684, 631, 13, MUTED)
+        shortcut(image, 'ESC', 'Cancel', 48, 727)
+        button(image, 'Apply selection', 'ENTER', 916, 716, 316)
 
-    @staticmethod
-    def name_overlay(image, ui):
-        cv2.rectangle(image, (133, 235), (788, 570), PANEL, -1)
-        cv2.rectangle(image, (133, 235), (788, 570), (70, 74, 57), 1)
-        text(image, "WHO'S DRIVING?", 167, 286, .88, WHITE, 2)
-        text(image, 'DRIVER NAME', 168, 326, .40, MUTED)
-        cv2.rectangle(image, (167, 341), (752, 401), BG, -1)
-        cv2.rectangle(image, (167, 341), (752, 401), TEAL, 1)
-        value = ui.name_input or 'Type your name...'
-        text(image, value, 183, 381, .75, WHITE if ui.name_input else MUTED)
-        if ui.name_input:
-            cursor = 186+cv2.getTextSize(ui.name_input, FONT, .75, 1)[0][0]
-            cv2.line(image, (cursor, 354), (cursor, 388), TEAL, 1)
-        if ui.name_error:
-            wrapped(image, ui.name_error[:180], 168, 435, 570, .42, RED, 21)
-        elif ui.name_match:
-            text(image, f"RETURNING DRIVER  /  {ui.name_match['id']}", 168, 438, .48, TEAL)
-            text(image, f"Personal best: {format_best(ui.name_match)}", 168, 469, .48, WHITE)
-        else:
-            text(image, 'New name? Your driver ID will be created automatically.', 168, 438, .44, MUTED)
-            text(image, 'Use the same name next time to improve your record.', 168, 469, .44, MUTED)
-        text(image, 'ENTER Continue     BACKSPACE Delete', 168, 536, .52, TEAL, 2)
-
-    @staticmethod
-    def rankings_overlay(image, ui):
-        cv2.rectangle(image, (110, 175), (865, 700), PANEL, -1)
-        cv2.rectangle(image, (110, 175), (865, 700), (70, 74, 57), 1)
-        text(image, 'LEADERBOARD', 143, 225, .90, WHITE, 2)
-        text(image, 'HIGHEST SCORE FIRST  /  FASTEST TIME BREAKS SCORE TIES', 145, 251, .36, MUTED)
-        for label, x in [('RANK', 143), ('DRIVER', 205), ('ID', 398), ('SCORE', 494), ('TIME', 600), ('RESULT', 730)]:
-            text(image, label, x, 286, .37, MUTED)
+    def rankings_screen(self, image, ui):
+        self.screen_header(image, 'SCORE HIGHER. FINISH FASTER.')
+        text(image, 'The leaderboard.', 48, 123, 36, WHITE, True)
+        text(image, 'Highest score first. Fastest time wins the tie.', 50, 176, 16, MUTED)
+        pill(image, '10 / 10 COMPLETIONS LEAD', 1026, 150, MINT, 10)
+        card(image, 48, 218, 1184, 470, radius=22)
+        for value, x in (('RANK', 76), ('DRIVER', 154), ('DRIVER ID', 478), ('SCORE', 644), ('FINISH / RUN TIME', 808), ('RESULT', 1060)):
+            text(image, value, x, 243, 10, MUTED, True)
+        cv2.line(image, (72, 271), (1208, 271), BORDER, 1)
         for i, driver in enumerate(ui.rankings[ui.ranking_page*8:ui.ranking_page*8+8]):
-            y = 325+i*37
-            color = TEAL if ui.driver and driver['id'] == ui.driver['id'] else WHITE
-            text(image, str(driver['rank']), 143, y, .49, color)
-            text(image, fit_text(driver['name'], 172, .46), 205, y, .46, color)
-            text(image, driver['id'], 398, y, .40, MUTED)
-            text(image, f"{driver['best_score']}/{SCORE_CAP}", 494, y, .46, TEAL)
-            text(image, format_time(driver['best_seconds']), 594, y, .41, AMBER)
-            text(image, 'COMPLETE' if driver['best_score'] == SCORE_CAP else 'PARTIAL', 730, y, .36, MUTED)
+            y = 281+i*48
+            active = ui.driver and driver['id'] == ui.driver['id']
+            if active:
+                rounded(image, 64, y-2, 1152, 44, mix(SURFACE, MINT, .07), 10)
+            elif i % 2 == 0:
+                rounded(image, 64, y-2, 1152, 44, mix(SURFACE, BG, .33), 10)
+            text(image, f"{driver['rank']:02}", 78, y+10, 17, MINT if driver['rank'] == 1 else MUTED, True)
+            text(image, driver['name'], 154, y+10, 17, MINT if active else WHITE, active, width=294)
+            text(image, driver['id'], 478, y+13, 13, MUTED)
+            text(image, f"{driver['best_score']:02} / {SCORE_CAP}", 644, y+9, 19, MINT, True)
+            text(image, format_time(driver['best_seconds']), 808, y+10, 18, WHITE, True, width=214)
+            complete = driver['best_score'] == SCORE_CAP
+            pill(image, 'COMPLETE' if complete else 'PARTIAL', 1060, y+5, MINT if complete else MUTED, 10)
         if not ui.rankings:
-            text(image, 'Play a round to set a scored leaderboard result.', 145, 354, .50, MUTED)
+            icon(image, 'flag', 640, 405, 48, FAINT)
+            centered(image, 'Your first run starts the story.', 458, 24, WHITE, True)
+            centered(image, 'Play a round to set your score and time.', 499, 16, MUTED)
         pages = max(1, (len(ui.rankings)+7)//8)
-        text(image, f'PAGE {ui.ranking_page+1}/{pages}   /   {len(ui.rankings)} DRIVERS', 145, 646, .41, MUTED)
-        text(image, 'ARROW KEYS Pages     B / ESC Back', 145, 680, .49, TEAL, 2)
+        pill(image, f'PAGE {ui.ranking_page+1} / {pages}', 48, 719, MUTED)
+        text(image, f'{len(ui.rankings)} drivers', 192, 726, 13, MUTED)
+        shortcut(image, '← / →', 'Pages', 806, 720)
+        shortcut(image, 'B / ESC', 'Back', 1060, 720)
+
+    def victory_screen(self, image, game, ui, seconds):
+        self.brand(image)
+        for i in range(72):
+            x = round((i*137+18*math.sin(seconds+i)) % WIDTH)
+            y = round((i*83+seconds*(36+i % 7*10)) % HEIGHT)
+            ink = (MINT, AMBER, BLUE, MUTED)[i % 4]
+            angle = i+seconds*2
+            dx, dy = round(4*math.cos(angle)), round(4*math.sin(angle))
+            cv2.line(image, (x-dx, y-dy), (x+dx, y+dy), ink, 2, cv2.LINE_AA)
+        card(image, 198, 112, 884, 616, mix(SURFACE, MINT, .025), 28, mix(BORDER, MINT, .3))
+        cv2.circle(image, (640, 192), 49, mix(SURFACE, MINT, .08), -1, cv2.LINE_AA)
+        icon(image, 'trophy', 640, 185, 49, MINT)
+        centered(image, 'MISSION COMPLETE', 260, 11, MINT, True)
+        centered(image, 'That’s a perfect run.', 289, 45, WHITE, True)
+        centered(image, ui.driver['name'] if ui.driver else 'Well driven.', 349, 22, MUTED, width=740)
+        rounded(image, 294, 398, 692, 115, BG, 18)
+        cv2.line(image, (640, 421), (640, 491), BORDER, 1)
+        centered(image, 'MOTORCYCLES DODGED', 418, 10, MUTED, True, 467)
+        centered(image, f'{game.score} / {SCORE_CAP}', 445, 36, MINT, True, 467)
+        centered(image, 'COMPLETION TIME', 418, 10, MUTED, True, 813)
+        centered(image, format_time(game.elapsed), 448, 32, WHITE, True, 813, 308)
+        for i in range(SCORE_CAP):
+            rounded(image, 390+i*51, 540, 40, 5, MINT, 2)
+        centered(image, ui.result_message or 'Every dodge counted. Mission accomplished.', 569, 14, MUTED, width=760)
+        button(image, 'Next driver', 'R', 338, 616, 278)
+        button(image, 'Leaderboard', 'B', 636, 616, 306, primary=False)
+        centered(image, 'ESC  Quit     ·     M  Sound', 691, 12, MUTED)
 
     @staticmethod
-    def overlay(image, title, lines, action, color):
-        shade = image[236:530, 133:788]
-        shade[:] = shade * .14 + np.array(PANEL) * .86
-        cv2.rectangle(image, (133, 236), (788, 530), (70, 74, 57), 1)
-        cv2.rectangle(image, (133, 236), (137, 530), color, -1)
-        text(image, title, 167, 296, .84, WHITE, 2)
-        for i, line in enumerate(lines):
-            text(image, line, 168, 341+i*30, .47, MUTED)
-        text(image, action, 168, 487, .60, color, 2)
+    def modal(image, title, subtitle, mark, ink=MINT, tag=None):
+        dim(image)
+        card(image, 180, 257, 560, 310, SURFACE, 24, mix(BORDER, ink, .25))
+        rounded(image, 208, 285, 48, 48, mix(SURFACE, ink, .13), 14)
+        icon(image, mark, 232, 309, 26, ink)
+        if tag:
+            pill(image, tag, 277, 296, ink, 10)
+        text(image, title, 208, 355, 31, WHITE, True, width=504)
+        wrap(image, subtitle, 210, 407, 496, 16, max_lines=3)
+
+    def ready_overlay(self, image, game, ui, tracking, camera_error):
+        name = ui.driver['name'] if ui.driver else 'Driver'
+        self.modal(image, 'Ready when you are.', f'{name}, center your face and stay inside the road. Close your eyes for 3 seconds to begin each cycle.',
+                   'wheel', tag='03 / 03  ·  READY TO DRIVE')
+        if tracking:
+            button(image, 'Start driving', 'ENTER', 208, 491, 504)
+        elif camera_error:
+            button(image, 'Reconnect camera', 'R', 208, 491, 504, ink=AMBER)
+        else:
+            rounded(image, 208, 491, 504, 50, RAISED, 12)
+            centered(image, 'Waiting for your camera…', 508, 16, MUTED, x=460)
+        if camera_error:
+            self.error_toast(image, 'Camera unavailable', 'Check the camera connection and close other camera apps.', 'R', 'Try again', AMBER)
+
+    def result_overlay(self, image, game, ui):
+        reason = {'left road edge': 'You touched the left edge of the road.',
+                  'right road edge': 'You touched the right edge of the road.',
+                  'motorcycle': 'A motorcycle caught you. Find your gap on the next run.'}.get(game.crash_reason, 'Keep inside the road and dodge incoming traffic.')
+        self.modal(image, 'End of the road.', reason, 'alert', RED, 'ROUND ENDED')
+        text(image, f'{game.score} / {SCORE_CAP} DODGED', 210, 463, 14, RED, True)
+        text(image, format_time(game.elapsed), 710, 461, 19, WHITE, True, align='right')
+        button(image, 'Next driver', 'R', 208, 505, 250, ink=RED)
+        button(image, 'Leaderboard', 'B', 472, 505, 240, primary=False)
+        if ui.result_message:
+            text(image, ui.result_message, 460, 590, 12, MUTED, align='center', width=700)
+
+    def pause_overlay(self, image):
+        self.modal(image, 'Take a breather.', 'Your drive and reaction countdown are paused. Come back when you’re ready.', 'pause', tag='DRIVE PAUSED')
+        button(image, 'Resume driving', 'P', 208, 491, 504)
+
+    def tracking_overlay(self, image, error):
+        self.modal(image, 'Your camera needs a moment.' if error else 'Let’s find your face.',
+                   'Check the camera connection and close other camera apps, then reconnect to continue.' if error else
+                   'Center your face in the camera. Your drive will resume automatically when tracking returns.',
+                   'head', AMBER, 'CAMERA UNAVAILABLE' if error else 'TRACKING PAUSED')
+        if error:
+            button(image, 'Reconnect camera', 'R', 208, 491, 504, ink=AMBER)
+            self.error_toast(image, 'Connection details', error, 'R', 'Reconnect', AMBER)
+        else:
+            rounded(image, 208, 491, 504, 50, RAISED, 12)
+            centered(image, 'Waiting for your face…', 508, 16, MUTED, x=460)
+
+    @staticmethod
+    def error_toast(image, title, detail, key, action, ink=RED):
+        card(image, 224, 608, 832, 132, mix(SURFACE, ink, .055), 18, mix(BORDER, ink, .5))
+        icon(image, 'alert', 252, 637, 22, ink)
+        text(image, title, 278, 627, 18, WHITE, True)
+        wrap(image, detail, 250, 663, 760, 13, MUTED, line_height=20, max_lines=2)
+        shortcut(image, key, action, 840, 703, 11)
