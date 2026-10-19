@@ -1,8 +1,9 @@
 # Night Shift — Systems Fair
 
-A Windows laptop desktop game: use the built-in webcam and move your head
+A Windows/Linux laptop desktop game: use the built-in webcam and move your head
 sideways to dodge motorcycles. Run the Python game directly on the laptop.
-Uses the supplied car/motorcycle PNGs and three MP3 horns in `assets/`.
+Uses the supplied car/motorcycle PNGs, three MP3 horns, the eye-opening alarm,
+and the mission-complete track in `assets/`.
 
 ## Play
 
@@ -11,13 +12,20 @@ confirm it. Face your camera and press **Enter** again to start driving.
 The launcher uses the existing `../Model Training/venv` environment. The first
 camera startup may take a few seconds while face tracking loads.
 
+Dodge **10 motorcycles** to complete the mission. The score display shows
+progress toward 10. Winning freezes the drive and opens a celebration splash
+with animated confetti, the driver's name, score, and completion time. The
+`metal-slug-mission-complete.mp3` victory track plays once and respects mute.
+The splash stays visible until you choose another action; **R** opens the next
+driver's name entry and **Esc** quits. Losing camera tracking after winning
+does not interrupt the celebration or its audio.
+
 From PowerShell in this folder:
 
 ```powershell
 .\start_game.bat
 .\start_game.bat --source 1
 .\start_game.bat --fullscreen
-.\start_game.bat --difficulty hard
 ```
 
 | Control | Action |
@@ -25,8 +33,7 @@ From PowerShell in this folder:
 | Move head left / right | Steer the car |
 | Enter | Start |
 | P | Pause / resume |
-| G | Open difficulty and car settings (pauses the round) |
-| 1 / 2 / 3 / 4 in settings | Select Easy / Medium / Hard / Impossible |
+| G | View automatic difficulty progression and choose a car (pauses the round) |
 | Enter / Esc in settings | Apply / cancel |
 | Left / Right arrows in settings | Choose car |
 | R | Save the run and ask for a new driver name; reconnect after a camera error |
@@ -50,39 +57,62 @@ display spelling is retained. The name box recognizes returning drivers and
 shows their ID and personal best before starting. Every restart opens a blank
 name box; enter the same name to continue improving that driver's record.
 
-The sidebar shows the **five longest drives**. Press **B** to see all drivers,
-their IDs, best times, and the difficulty of that best run. The ranking uses
-each driver's longest active driving time across all difficulties. Pauses,
-menus, name entry, and long tracking-loss pauses do not add time. Equal best
-times use driver ID as the stable tie-breaker. A slower or equal run never
-replaces a personal best; it still increments that driver's attempt count.
+The sidebar shows the **top five drivers**. Press **B** for the full leaderboard,
+including driver IDs, scores, times, and **COMPLETE** or **PARTIAL** results.
+Ranking uses **highest score first, then shortest active driving time** for
+equal scores. Every 10/10 completion ranks above an unfinished run, and the
+fastest completion leads. A quick low-score attempt cannot outrank a higher
+score. Times display milliseconds; exact score/time ties use driver ID as a
+stable tie-breaker. Pauses, menus, name entry, and long tracking-loss pauses
+do not add time.
 
-Records save on a crash, restart, difficulty change, or normal quit. Each run
+Each driver keeps one personal best using that same rule. More points replace
+the previous best; equal points replace it only with a shorter time. Slower,
+lower-scoring, and equal results still increment the attempt count.
+
+Records save on a win, crash, restart, or normal quit. Each run
 is recorded once. Registered drivers enter the rankings after their first run.
 Car changes alone do not restart a run. Driver records persist between launches
 in **`data/drivers.json`**. Demo mode uses **`data/demo_drivers.json`** so practice
 doesn't change the main rankings. `--database PATH` chooses another file.
 
-The JSON file holds IDs, normalized names, personal-best seconds and difficulty,
-attempt counts, and timestamps. Writes replace the file atomically; an unreadable
+The version-2 JSON file holds IDs, normalized names, personal-best score, seconds,
+stage reached, attempt counts, and timestamps. Writes replace the file atomically; an unreadable
 file is preserved rather than reset. Save failures appear on screen and can be
 retried with Enter. Keep this folder writable and run one game instance per
 database. Copy the JSON file to back up or transfer driver records.
+
+Older version-1 files did not store scores, so their times cannot be treated as
+completed missions. Driver IDs, names, and attempt counts are preserved, and
+old time/difficulty results are retained under `legacy_best`. These drivers
+enter the new rankings after their next scored run. Reading an old file does
+not rewrite it; the upgrade is saved atomically on the next successful write.
 
 ## Rules
 
 - EAR must stay **below 0.22 for at least 3 continuous seconds** before the
   game flags the player **ASLEEP**. Short blinks do not qualify. The driver
   monitor shows the closure duration; reopening resets it immediately.
-- Once flagged asleep, a uniformly random **3–5 second spawn timer** begins.
-  The first motorcycle therefore appears 6–8 seconds after continuous closure
-  begins. **Reopening does not cancel an already armed spawn timer.** Further
-  closures during it do not reset or stack it.
+- Once flagged asleep, a **score-based reaction countdown** begins, shrinking
+  from **2.5 seconds at score 0** to **0.7 seconds at score 9**.
+  **`smoke-alarm-beep.mp3` plays once when that timer starts: open your eyes
+  and prepare to dodge.** An **OPEN YOUR EYES** prompt stays visible while the
+  countdown is active and your eyes remain closed. The cue respects mute;
+  the visual prompt is still shown when muted.
+  At score 0, the first motorcycle therefore appears **5.5 seconds** after
+  continuous closure begins: 3 seconds to qualify plus 2.5 seconds after the
+  alarm. **Reopening does not cancel an already armed spawn timer.** Further
+  closures during it do not reset or stack it. Once armed, the countdown keeps
+  its duration even if another dodge increases the score or advances the stage.
 - When it expires, a randomly selected motorcycle appears near your current
   horizontal position, and one of the asset horn sounds plays at random. The
   motorcycle's horizontal position then stays fixed, giving you time to evade.
-- If the player is still flagged asleep at the spawn, another random timer
-  begins. Otherwise, another three-second continuous closure is needed.
+- If the player is still flagged asleep at the spawn, another score-based timer
+  begins with a fresh alarm cue. Otherwise, another three-second continuous
+  closure is needed. The alarm and motorcycle horn can play together when
+  a spawn and a new countdown happen at the same time. Pausing or losing
+  tracking stops audio and freezes the countdown; resuming does not replay
+  an alarm for a countdown that was already armed.
 - The camera is mirrored for intuitive steering. The face rectangle's horizontal
   center and dimensions are mapped into road coordinates. Its center stays at a
   **fixed vertical position**; the car PNG fits inside this visible collision box.
@@ -100,8 +130,11 @@ database. Copy the JSON file to back up or transfer driver records.
   Press **R** to enter the next driver's name; move your head toward the center
   before starting their drive.
   Each successfully avoided motorcycle
-  adds one point. Each successive motorcycle spawns faster than the last,
-  independently of score. Difficulty controls starting speed and the increase.
+  adds one point, up to **10**. The tenth dodge completes the mission and clears
+  all remaining motorcycles and spawn timers. A collision on the same update
+  takes priority over a dodge. Each point increases the speed of subsequent
+  motorcycles. Difficulty advances automatically from Easy to Impossible as
+  the score approaches 10.
 - Steering and eye validity are independent. A valid face can still steer when
   eye measurements are unavailable. During brief coasting, the road and any
   armed spawn timer continue; no face history means no prediction. Once the
@@ -114,22 +147,33 @@ database. Copy the JSON file to back up or transfer driver records.
 
 ## Difficulty
 
-Press **G**, select **1–4** for difficulty and **Left/Right arrows** for the car,
-then **Enter** to apply. Car selection is available only here. Medium is the default.
-**Esc** cancels and resumes the previous screen. Applying a different level
-saves the current run and asks for a driver name for a fresh round. Restart
-keeps the selected level and car and resets motorcycle speeds.
+Every round starts on **Easy**. The game advances through the stages below
+automatically as you earn points; there is no manual difficulty selector or
+`--difficulty` option. The current stage appears above the road.
 
-| Level | First motorcycle speed | Increase per new motorcycle |
-| --- | --- | --- |
-| Easy | 180 pixels/second | +12 pixels/second |
-| Medium | 240 pixels/second | +22 pixels/second |
-| Hard | 330 pixels/second | +35 pixels/second |
-| Impossible | 480 pixels/second | +55 pixels/second |
+| Score | Stage | Motorcycle speed at each score | Alarm-to-spawn delay at each score |
+| --- | --- | --- | --- |
+| 0–2 | Easy | 180, 192, 204 pixels/second | 2.5, 2.4, 2.3 seconds |
+| 3–5 | Medium | 240, 262, 284 pixels/second | 2.0, 1.8, 1.6 seconds |
+| 6–7 | Hard | 330, 365 pixels/second | 1.3, 1.1 seconds |
+| 8–9 | Impossible | 480, 535 pixels/second | 0.9, 0.7 seconds |
+| 10 | Mission complete | Gameplay stops | No further spawns |
 
-Speeds are in game coordinates and increase on every spawn without the old
-speed cap. Each bike retains its own speed while on screen. The three-second
-sleep requirement and random 3–5 second countdown apply at every difficulty.
+Speeds are in game coordinates and increase at every point, including when
+crossing a stage boundary. Spawning additional motorcycles at the same score
+keeps their speed the same. Each bike retains its assigned speed while on
+screen. Restarting resets the score, stage, and speed to Easy at 0 points.
+The three-second eye-closure requirement applies at every stage. Each point
+shortens the delay between the alarm's **start** and the next motorcycle spawn;
+the timer does not wait for the alarm clip to finish or for the player to open
+their eyes. The spawn horn replaces any remaining alarm audio. Pauses and
+tracking loss freeze the countdown. Settings show the timing ranges, and the
+road-watch panel shows the next reaction window before a countdown is armed.
+
+Press **G** to view the progression and choose a car with **Left/Right arrows**,
+then **Enter** to apply. **Esc** cancels and resumes the previous screen. Car
+changes preserve your score and current round. Driver records save the stage
+reached alongside the score and time of a personal best in `best_difficulty`.
 
 ## Face tracking
 
@@ -166,10 +210,32 @@ py -3.11 -m venv .venv
 .\.venv\Scripts\python.exe game.py
 ```
 
+On Linux, use a Python 3.11 virtual environment:
+
+```bash
+python3.11 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+python game.py
+```
+
+If this project already has the local Python environment installed, launch it
+with `.venv/bin/python game.py`. Add `--demo` to play without a webcam.
+
 The pinned MediaPipe version is intentional: this game uses its bundled
-`solutions.face_mesh` API. Audio uses Windows `winmm`
-to play MP3s asynchronously. An audio error is shown in the interface and its
-details print in the console.
+`solutions.face_mesh` API. Audio uses Windows `winmm` on Windows and Pygame's
+audio mixer on Linux to play MP3s asynchronously. Pygame is installed by
+`requirements.txt` on Linux; no external MP3 player is needed. An audio error is
+shown in the interface and its details print in the console. On Linux, check
+your desktop sound output and volume if horns are silent. **M** toggles mute.
+Only the three designated horn files are selected for motorcycle sounds;
+the victory track and `smoke-alarm-beep.mp3` are excluded from random horns.
+
+To verify Linux MP3 loading and playback controls without speakers:
+
+```bash
+SDL_AUDIODRIVER=dummy .venv/bin/python -m unittest -v test_audio
+```
 
 Camera 0 is the default built-in webcam. If it cannot open, close other camera
 apps and check Windows Settings > Privacy & security > Camera > Let desktop
@@ -181,7 +247,7 @@ webcam under a different index, launch with `--source 1`.
 ```powershell
 .\start_game.bat --demo
 .\start_game.bat --smoke-test
-& '..\Model Training\venv\Scripts\python.exe' -m unittest -v test_game test_tracking test_drivers
+& '..\Model Training\venv\Scripts\python.exe' -m unittest -v test_game test_tracking test_drivers test_audio
 ```
 
 Demo mode is explicitly labeled: move the mouse (or A/D / arrow keys) to steer,
@@ -190,5 +256,13 @@ and regaining the face. Move sideways before pressing L to see the car coast;
 move the mouse elsewhere before pressing L again to see gradual correction.
 Smoke testing opens no window or camera and writes `preview.png`. Tests cover
 sustained closure, missing/invalid eyes, motion prediction, gradual recovery,
-road bounds, cached frames, mesh EAR, all four speed progressions, settings,
+road bounds, cached frames, mesh EAR, automatic difficulty stages, car settings,
 pauses, mirrored fixed-height motion, collisions and scoring.
+Tests also cover the 10-point cap, victory saving, frozen completion time,
+single-play victory audio, tracking loss after winning, and restart.
+Alarm tests cover the three-second threshold, one cue per countdown, reopening,
+mute, pause/tracking recovery, and separate alarm/horn playback.
+Reaction-timing tests cover every score, stage transitions during an armed
+countdown, frozen timers, restart, and the alarm-to-horn interval at score 9.
+Leaderboard tests cover score-first/fastest-time ordering, personal bests,
+millisecond ties, persistence, invalid results, and version-1 history upgrades.

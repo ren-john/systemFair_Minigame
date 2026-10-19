@@ -7,19 +7,23 @@ ROAD_LEFT, ROAD_RIGHT = 70, 850
 ROAD_TOP, ROAD_BOTTOM = 138, 756
 PLAYER_Y = 640
 ASLEEP_SECONDS = 3.0
+SCORE_CAP = 10
 
 
 @dataclass(frozen=True)
 class Difficulty:
+    start_score: int
     start_speed: float
     speed_step: float
+    spawn_delay: float
+    delay_step: float
 
 
 DIFFICULTIES = {
-    'easy': Difficulty(180, 12),
-    'medium': Difficulty(240, 22),
-    'hard': Difficulty(330, 35),
-    'impossible': Difficulty(480, 55),
+    'easy': Difficulty(0, 180, 12, 2.5, .1),
+    'medium': Difficulty(3, 240, 22, 2., .2),
+    'hard': Difficulty(6, 330, 35, 1.3, .2),
+    'impossible': Difficulty(8, 480, 55, .9, .2),
 }
 
 
@@ -54,11 +58,8 @@ class Motorcycle:
 
 
 class Game:
-    def __init__(self, rng=None, difficulty='medium'):
+    def __init__(self, rng=None):
         self.rng = rng or random.Random()
-        if difficulty not in DIFFICULTIES:
-            raise ValueError(f'Unknown difficulty: {difficulty}')
-        self.difficulty = difficulty
         self.reset()
 
     def reset(self):
@@ -71,12 +72,22 @@ class Game:
         self.player = Rect(380, PLAYER_Y - 75, 160, 150)
         self.spawn_count = 0
         self.crash_reason = ''
+        self.warning_triggered = False
 
     def crash(self, reason):
         self.state = 'over'
         self.crash_reason = reason
         self.pending = None
         self.clear_sleep()
+        self.warning_triggered = False
+
+    def win(self):
+        self.state = 'won'
+        self.score = SCORE_CAP
+        self.bikes.clear()
+        self.pending = None
+        self.clear_sleep()
+        self.warning_triggered = False
 
     def clear_sleep(self):
         self.previous_closed = False
@@ -87,29 +98,37 @@ class Game:
         return self.closed_seconds >= ASLEEP_SECONDS
 
     @property
+    def difficulty(self):
+        return next(name for name, settings in reversed(DIFFICULTIES.items())
+                    if self.score >= settings.start_score)
+
+    @property
     def next_speed(self):
         settings = DIFFICULTIES[self.difficulty]
-        return settings.start_speed + self.spawn_count * settings.speed_step
+        return settings.start_speed + (self.score-settings.start_score) * settings.speed_step
 
-    def set_difficulty(self, difficulty):
-        if difficulty not in DIFFICULTIES:
-            raise ValueError(f'Unknown difficulty: {difficulty}')
-        if difficulty != self.difficulty:
-            self.difficulty = difficulty
-            self.reset()
+    @property
+    def spawn_delay(self):
+        """Alarm-to-spawn time captured when the next countdown is armed."""
+        settings = DIFFICULTIES[self.difficulty]
+        score = min(self.score, SCORE_CAP-1)
+        return round(settings.spawn_delay - (score-settings.start_score)*settings.delay_step, 2)
 
     def start(self):
         self.reset()
         self.state = 'running'
 
     def update(self, dt, player, eyes_closed, tracking=True, eye_dt=None, eyes_valid=True):
-        """Return spawn count for audio. All timers freeze while paused/untracked.
+        """Return spawn count; warning_triggered marks a newly armed countdown.
+
+        All timers freeze while paused/untracked.
 
         Three continuous seconds below the EAR threshold flags asleep and arms
-        one 3-5 second timer. Reopening resets sleep qualification but never
+        one score-dependent reaction timer. Reopening resets sleep qualification but never
         cancels an armed spawn. eye_dt uses camera sample time when supplied;
         redisplaying a cached camera frame must not accumulate closure time.
         """
+        self.warning_triggered = False
         if self.state != 'running' or not tracking:
             self.clear_sleep()
             return 0
@@ -148,8 +167,10 @@ class Game:
                 self.spawn_count += 1
                 spawned = 1
         if self.asleep and self.pending is None:
-            self.pending = self.rng.uniform(3.0, 5.0)
+            self.pending = self.spawn_delay
+            self.warning_triggered = True
         survivors = []
+        dodged = 0
         for bike in self.bikes:
             old_y = bike.rect.y
             # A new motorcycle starts at the horizon on this update.
@@ -161,8 +182,15 @@ class Game:
                 self.crash('motorcycle')
             if bike.rect.y > ROAD_BOTTOM:
                 if not collided and self.state != 'over':
-                    self.score += 1
+                    dodged += 1
             else:
                 survivors.append(bike)
         self.bikes = survivors
+        # Resolve every collision before awarding points, so list order cannot
+        # turn a simultaneous crash into a victory.
+        if self.state == 'running':
+            self.score = min(SCORE_CAP, self.score + dodged)
+            if self.score == SCORE_CAP:
+                self.win()
+                return 0
         return spawned

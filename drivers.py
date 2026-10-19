@@ -1,4 +1,4 @@
-"""Local driver identities and longest-drive records, saved atomically as JSON."""
+"""Local driver records ranked by highest score, then fastest active time."""
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -9,7 +9,7 @@ from pathlib import Path
 import re
 import tempfile
 
-from game_core import DIFFICULTIES
+from game_core import DIFFICULTIES, SCORE_CAP
 
 MAX_NAME = 24
 
@@ -24,9 +24,15 @@ def clean_name(value):
 
 
 def format_time(seconds):
-    tenths = int(max(0, seconds)*10)
-    minutes, remainder = divmod(tenths, 600)
-    return f'{minutes:02}:{remainder//10:02}.{remainder%10}'
+    milliseconds = round(max(0, seconds)*1000)
+    minutes, remainder = divmod(milliseconds, 60000)
+    return f'{minutes:02}:{remainder//1000:02}.{remainder%1000:03}'
+
+
+def format_best(driver):
+    if driver['best_score'] is None:
+        return 'NO SCORED RUN YET'
+    return f"{driver['best_score']}/{SCORE_CAP}  /  {format_time(driver['best_seconds'])}"
 
 
 class StoreError(RuntimeError):
@@ -41,11 +47,11 @@ def require(condition):
 class DriverStore:
     def __init__(self, path):
         self.path = Path(path)
-        self.data = {'version': 1, 'next_id': 1, 'drivers': []}
+        self.data = {'version': 2, 'next_id': 1, 'drivers': []}
         if self.path.exists():
             try:
                 data = json.loads(self.path.read_text(encoding='utf-8'))
-                require(data['version'] == 1 and isinstance(data['drivers'], list))
+                require(data['version'] in (1, 2) and isinstance(data['drivers'], list))
                 require(type(data['next_id']) is int and data['next_id'] > 0)
                 ids, names = set(), set()
                 for driver in data['drivers']:
@@ -59,8 +65,26 @@ class DriverStore:
                     require(type(driver['best_seconds']) in (int, float))
                     require(math.isfinite(driver['best_seconds']) and driver['best_seconds'] >= 0)
                     require(driver['best_difficulty'] in DIFFICULTIES or driver['best_difficulty'] is None)
+                    if data['version'] == 2:
+                        score = driver['best_score']
+                        require(score is None or (type(score) is int and 0 <= score <= SCORE_CAP))
+                        if score is None:
+                            require(driver['best_seconds'] == 0 and driver['best_difficulty'] is None)
+                        else:
+                            require(driver['attempts'] > 0 and driver['best_difficulty'] in DIFFICULTIES)
                     ids.add(driver['id'])
                     names.add(key)
+                if data['version'] == 1:
+                    # Scores were never stored by v1. Preserve its time record
+                    # as history instead of guessing a score or a completion.
+                    for driver in data['drivers']:
+                        if driver['attempts']:
+                            driver['legacy_best'] = {
+                                'seconds': driver['best_seconds'],
+                                'difficulty': driver['best_difficulty'],
+                            }
+                        driver.update(best_score=None, best_seconds=0., best_difficulty=None)
+                    data['version'] = 2
                 self.data = data
             except (OSError, ValueError, KeyError, TypeError, OverflowError) as exc:
                 raise StoreError(f'Cannot read driver database {self.path}. Existing data was not changed: {exc}') from exc
@@ -103,23 +127,27 @@ class DriverStore:
             return existing
         data = deepcopy(self.data)
         driver = {'id': f"D{data['next_id']:04}", 'name': name, 'name_key': name.casefold(),
-                  'best_seconds': 0., 'best_difficulty': None, 'attempts': 0,
+                  'best_score': None, 'best_seconds': 0., 'best_difficulty': None, 'attempts': 0,
                   'created_at': datetime.now(timezone.utc).isoformat(), 'last_played_at': None}
         data['next_id'] += 1
         data['drivers'].append(driver)
         self._commit(data)
         return deepcopy(driver)
 
-    def record(self, driver_id, seconds, difficulty):
-        if not math.isfinite(seconds) or seconds < 0 or difficulty not in DIFFICULTIES:
+    def record(self, driver_id, score, seconds, difficulty):
+        if (type(score) is not int or not 0 <= score <= SCORE_CAP
+                or type(seconds) not in (int, float) or not math.isfinite(seconds)
+                or seconds < 0 or difficulty not in DIFFICULTIES):
             raise ValueError('Invalid drive result.')
         data = deepcopy(self.data)
         driver = next((d for d in data['drivers'] if d['id'] == driver_id), None)
         if driver is None:
             raise ValueError(f'Unknown driver: {driver_id}')
         seconds = round(seconds, 3)
-        improved = seconds > driver['best_seconds']
+        improved = (driver['best_score'] is None or score > driver['best_score']
+                    or (score == driver['best_score'] and seconds < driver['best_seconds']))
         if improved:
+            driver['best_score'] = score
             driver['best_seconds'] = seconds
             driver['best_difficulty'] = difficulty
         driver['attempts'] += 1
@@ -128,8 +156,8 @@ class DriverStore:
         return deepcopy(driver), improved
 
     def ranking(self):
-        drivers = sorted((d for d in self.data['drivers'] if d['attempts'] > 0),
-                         key=lambda d: (-d['best_seconds'], int(d['id'][1:])))
+        drivers = sorted((d for d in self.data['drivers'] if d['best_score'] is not None),
+                         key=lambda d: (-d['best_score'], d['best_seconds'], int(d['id'][1:])))
         return [dict(deepcopy(d), rank=i+1) for i, d in enumerate(drivers)]
 
 
@@ -194,13 +222,14 @@ class DriverSession:
         if not self.run_open:
             return True
         try:
-            driver, improved = self.store.record(self.ui.driver['id'], self.game.elapsed, self.game.difficulty)
+            driver, improved = self.store.record(self.ui.driver['id'], self.game.score,
+                                                 self.game.elapsed, self.game.difficulty)
         except StoreError as exc:
             self.ui.save_error = str(exc)
             return False
         self.ui.driver = driver
         self.ui.rankings = self.store.ranking()
         self.ui.save_error = ''
-        self.ui.result_message = ('NEW PERSONAL BEST!  ' if improved else 'PERSONAL BEST  ') + format_time(driver['best_seconds'])
+        self.ui.result_message = ('NEW PERSONAL BEST!  ' if improved else 'PERSONAL BEST  ') + format_best(driver)
         self.run_open = False
         return True

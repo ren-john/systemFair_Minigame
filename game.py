@@ -11,9 +11,9 @@ os.environ.setdefault('TF_CPP_MIN_LOG_LEVEL', '2')
 import cv2
 import numpy as np
 
-from audio import Horns
+from audio import Horns, horn_paths, VICTORY_FILE, WARNING_FILE
 from game_core import (Game, Rect, Motorcycle, PLAYER_Y, ROAD_LEFT, ROAD_RIGHT,
-                       DIFFICULTIES, ASLEEP_SECONDS, player_from_face)
+                       ASLEEP_SECONDS, player_from_face)
 from renderer import Renderer
 from tracking import Observation, Tracker
 from face_geometry import EAR_THRESHOLD
@@ -35,7 +35,6 @@ def arguments():
     parser.add_argument('--demo', action='store_true', help='Mouse/A,D steering, space toggles eyes, L toggles tracking loss')
     parser.add_argument('--mute', action='store_true')
     parser.add_argument('--fullscreen', action='store_true')
-    parser.add_argument('--difficulty', choices=list(DIFFICULTIES), default='medium')
     parser.add_argument('--database', type=Path, help='Override the local driver-records JSON path')
     parser.add_argument('--smoke-test', action='store_true', help='Render a deterministic preview and check assets without opening a camera/window')
     for_args = parser.parse_args()
@@ -55,15 +54,17 @@ def smoke_test(renderer):
     assert game.pending is None
     game.update(ASLEEP_SECONDS, game.player, True)
     assert game.asleep
-    assert 3 <= game.pending <= 5
+    assert game.warning_triggered
+    assert game.pending == 2.5
     delay = game.pending
     assert game.update(delay, game.player, False) == 1
     assert game.pending is None
+    assert not game.warning_triggered
     game.elapsed = 27
     game.score = 4
-    game.bikes = [Motorcycle(Rect(390, 320, 76, 122), 220, 1),
-                  Motorcycle(Rect(650, 190, 76, 122), 220, 2)]
-    game.pending = 3.7
+    game.bikes = [Motorcycle(Rect(390, 320, 76, 122), game.next_speed, 1),
+                  Motorcycle(Rect(650, 190, 76, 122), game.next_speed, 2)]
+    game.pending = round(game.spawn_delay/2, 1)
     preview = renderer.draw(game, Observation(ear=.28), True, False, 1,
                             'AUDIO  /  RANDOM HORN', EAR_THRESHOLD, demo=True)
     output = ROOT / 'preview.png'
@@ -80,15 +81,14 @@ def main():
         return
     database = args.database or ROOT / 'data' / ('demo_drivers.json' if args.demo else 'drivers.json')
     store = DriverStore(database)
-    horns = Horns(sorted(args.assets.glob('*.mp3')))
+    horns = Horns(horn_paths(args.assets), args.assets / VICTORY_FILE, args.assets / WARNING_FILE)
     horns.muted = args.mute
     reported_audio_error = ''
     tracker = None
-    game = Game(difficulty=args.difficulty)
+    game = Game()
     session = DriverSession(game, store)
     settings_return_state = 'ready'
     rankings_return_state = 'ready'
-    selected_difficulty = game.difficulty
     car = 0
     selected_car = car
     fullscreen = args.fullscreen
@@ -108,6 +108,7 @@ def main():
         previous = time.monotonic()
         was_tracking = False
         last_observation_time = None
+        win_started = None
         while True:
             now = time.monotonic()
             dt = min(.1, now - previous)
@@ -136,24 +137,35 @@ def main():
                 game.clear_sleep()
                 eye_dt = 0
             last_observation_time = obs.timestamp if eyes_valid else None
-            if game.update(dt if was_tracking else 0, player, closed, tracking,
-                           eye_dt=eye_dt, eyes_valid=eyes_valid):
-                horns.play()
-            if game.state == 'over' and session.run_open and not session.ui.save_error:
+            previous_state = game.state
+            spawned = game.update(dt if was_tracking else 0, player, closed, tracking,
+                                  eye_dt=eye_dt, eyes_valid=eyes_valid)
+            if game.state == 'won' and previous_state != 'won':
+                win_started = now
+                horns.play_victory()
+            elif game.state == 'running':
+                if spawned:
+                    horns.play()
+                if game.warning_triggered:
+                    horns.play_warning()
+            if game.state in ('over', 'won') and session.run_open and not session.ui.save_error:
                 session.finish_run()
             was_tracking = tracking
-            if game.state == 'over' or not tracking:
+            if game.state == 'over' or (not tracking and game.state != 'won'):
                 horns.stop()
             audio_status = 'AUDIO  /  MUTED' if horns.muted else 'AUDIO  /  RANDOM HORN'
+            if game.state == 'won' and not horns.muted:
+                audio_status = 'AUDIO  /  MISSION COMPLETE'
             if horns.error:
                 audio_status = 'AUDIO UNAVAILABLE / SEE CONSOLE'
                 if horns.error != reported_audio_error:
                     print(f'Audio diagnostic: {horns.error}', file=sys.stderr)
                     reported_audio_error = horns.error
             image = renderer.draw(game, obs, tracking, closed, car, audio_status,
-                                  args.ear_threshold, args.demo, selected_difficulty,
+                                  args.ear_threshold, args.demo,
                                   steering_status='coasting' if motion.predicted else 'recentering' if motion.recovering else 'live',
-                                  eyes_valid=eyes_valid, ui=session.ui, selected_car=selected_car)
+                                  eyes_valid=eyes_valid, ui=session.ui, selected_car=selected_car,
+                                  celebration_time=now-win_started if win_started is not None else 0.)
             cv2.imshow(WINDOW, image)
             key = cv2.waitKeyEx(16)
             if cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) < 1:
@@ -174,19 +186,11 @@ def main():
                     game.state = 'paused'
                 continue
             if game.state == 'settings':
-                if key in (ord('1'), ord('2'), ord('3'), ord('4')):
-                    selected_difficulty = list(DIFFICULTIES)[key-ord('1')]
-                elif key in (2424832, 2555904):
+                if key in (2424832, 2555904):
                     selected_car = (selected_car + (-1 if key == 2424832 else 1)) % 3
                 elif key in (10, 13):
-                    changing_difficulty = selected_difficulty != game.difficulty
-                    if changing_difficulty and not session.finish_run():
-                        continue
                     game.state = settings_return_state
                     car = selected_car
-                    game.set_difficulty(selected_difficulty)
-                    if changing_difficulty:
-                        session.ask_name()
                 elif key in (27, ord('g')):
                     game.state = settings_return_state
                 continue
@@ -209,7 +213,6 @@ def main():
                 continue
             if key == ord('g'):
                 settings_return_state = game.state
-                selected_difficulty = game.difficulty
                 selected_car = car
                 game.state = 'settings'
                 game.clear_sleep()

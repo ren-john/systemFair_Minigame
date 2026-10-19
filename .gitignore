@@ -1,5 +1,6 @@
 __pycache__/
 .venv/
+.python-runtime/
 preview.png
 preview_settings.png
 preview_crash.png
